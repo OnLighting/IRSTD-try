@@ -1,0 +1,42 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# 虚拟环境
+venv/
+.venv/
+env/
+.env/
+
+# IDE 配置
+.idea/
+.vscode/
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+# 数据集（仓库根目录下）
+/data/
+# 模型文件
+*.pth
+*.pt
+*.ckpt
+*.pkl
+*.onnx
+
+# 压缩包
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# AI相关配置文件
+.claude/
+/docs/
+debug/

@@ -1,0 +1,50 @@
+{
+  "checkpoint": "runs/g0/g0_best.pt",
+  "device": "cuda",
+  "params": 1192237,
+  "flops_512": 63795363840.0,
+  "datasets": {
+    "irstd1k": {
+      "n_images": 201,
+      "iou_mean": 0.633698477485707,
+      "n_iou_mean": 0.816825478646438,
+      "pd": 0.9601990049751243,
+      "fa_per_image": 0.3333333333333333,
+      "match_rule": {
+        "connectivity": "8-neighborhood",
+        "radius_px": 5,
+        "matching": "greedy nearest centroid"
+      },
+      "latency_ms_per_image": 91.5436780274804,
+      "throughput_imgs_per_s": 10.923747237901138
+    },
+    "sirst_uavb": {
+      "n_images": 600,
+      "iou_mean": 0.09272719177529992,
+      "n_iou_mean": 0.5462163318446136,
+      "pd": 0.485,
+      "fa_per_image": 3.775,
+      "match_rule": {
+        "connectivity": "8-neighborhood",
+        "radius_px": 5,
+        "matching": "greedy nearest centroid"
+      },
+      "latency_ms_per_image": 115.30415813128153,
+      "throughput_imgs_per_s": 8.672714117225787
+    },
+    "sirst4": {
+      "n_images": 1067,
+      "iou_mean": 0.5468162561607283,
+      "n_iou_mean": 0.7732960876201547,
+      "pd": 0.6907216494845361,
+      "fa_per_image": 1.8556701030927836,
+      "match_rule": {
+        "connectivity": "8-neighborhood",
+        "radius_px": 5,
+        "matching": "greedy nearest centroid"
+      },
+      "latency_ms_per_image": 62.85137558162157,
+      "throughput_imgs_per_s": 15.910550735701177
+    }
+  }
+}

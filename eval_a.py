@@ -273,6 +273,16 @@ def _evaluate_dataset(
     summary = aggregate_diagnostics(records)
     summary["model_latency_ms_per_image"] = 1000.0 * sum(model_times) / max(1, len(dataset))
     summary["end_to_end_imgs_per_s"] = len(dataset) / max(elapsed, 1e-8)
+    # v6: report coverage gate as a separate flag (does not feed
+    # degeneration_flags, which only covers collapse-style failures).
+    coverage_threshold = config["diagnostics"]["gates"].get("coverage_at_5px_min")
+    coverage_value = summary.get("coverage_at_5px_mean")
+    if coverage_threshold is not None and coverage_value is not None:
+        summary["coverage_at_5px_gate"] = {
+            "threshold": float(coverage_threshold),
+            "value": float(coverage_value),
+            "passed": float(coverage_value) >= float(coverage_threshold),
+        }
     try:
         summary["degeneration_flags"] = degeneration_flags(summary, config["diagnostics"]["gates"])
     except (KeyError, TypeError) as error:

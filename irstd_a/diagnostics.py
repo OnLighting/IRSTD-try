@@ -73,6 +73,35 @@ def _centroid_recall(source: np.ndarray, mask: np.ndarray, radius: float = 5.0) 
     return float((distance.min(axis=1) <= radius).mean())
 
 
+def _coverage_at_5px(
+    presence: np.ndarray, center: np.ndarray, radius: int = 5
+) -> float | None:
+    """Per-image v6 coverage gate: for each true centroid, is there at
+    least one ``presence > 0.5`` pixel within ``radius`` px?
+
+    Returns 1.0 if every centre is covered, 0.0 if none is, partial in
+    between. Returns ``None`` when the image has no targets.
+
+    This is the v6 successor to ``centroid_recall_5px``: it directly
+    measures whether the ``P`` head places a strong activation near each
+    true centroid, independent of the S impulse-strength threshold.
+    """
+    if float(center.sum()) <= EPS:
+        return None
+    true_centres = _centroids(center > 0.5)
+    if len(true_centres) == 0:
+        return None
+    threshold = 0.5
+    strong = presence >= threshold
+    strong_centres = _centroids(strong)
+    if len(strong_centres) == 0:
+        return 0.0
+    distance = np.sqrt(
+        ((true_centres[:, None, :] - strong_centres[None, :, :]) ** 2).sum(axis=-1)
+    )
+    return float((distance.min(axis=1) <= radius).mean())
+
+
 def _validate_spatial_maps(
     image: Tensor,
     mask: Tensor,
@@ -190,6 +219,7 @@ def component_diagnostics(
                         float((np.abs(amplitude - source_proxy) * center).sum()),
                         float(center.sum()),
                     ),
+                    "coverage_at_5px": _coverage_at_5px(presence, center, radius=5),
                 }
             )
         for name, values in maps.items():

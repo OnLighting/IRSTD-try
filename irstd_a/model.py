@@ -249,7 +249,11 @@ class APSFUnmixingNet(nn.Module):
         entropy = -(
             psf_weights * torch.log(psf_weights.clamp_min(1e-8))
         ).sum(dim=1, keepdim=True) / math.log(self.num_psf)
-        uncertainty = (0.75 * uncertainty_reconstruction + 0.25 * entropy).clamp(0.0, 1.0)
+        # v6: public U carries exactly one construct -- the reconstruction
+        # uncertainty head. PSF mixture entropy is exposed only as an aux
+        # diagnostic. Mixing them in v5 made the loss unable to fix the
+        # public U (Spearman = -0.21) because entropy contributed without
+        # supervision.
         reconstruction_raw = background + psf_raw + residual
 
         def crop(value: Tensor) -> Tensor:
@@ -260,7 +264,7 @@ class APSFUnmixingNet(nn.Module):
             "S": crop(source),
             "T_psf": crop(psf_raw.clamp(0.0, 1.0)),
             "R": crop(residual),
-            "U": crop(uncertainty),
+            "U": crop(uncertainty_reconstruction),
             "reconstruction": crop(reconstruction_raw.clamp(0.0, 1.0)),
         }
         if return_aux:

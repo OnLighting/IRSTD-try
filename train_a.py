@@ -307,7 +307,11 @@ def main() -> None:
     val_loader = _make_loader(val_dataset, 1, False, workers, device, seed + 1)
 
     model = build_a_model(**config["model"]).to(device)
-    criterion = APSFUnmixingLoss(**config["loss"]).to(device)
+    criterion = APSFUnmixingLoss(
+        weights=config["loss"]["weights"],
+        sigma_min=float(config["model"]["sigma_min"]),
+        sigma_max=float(config["model"]["sigma_max"]),
+    ).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(config["optim"]["lr"]),
@@ -370,7 +374,15 @@ def main() -> None:
             )
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
                 prediction = model(image, return_aux=True)
-                total, terms = criterion(image, mask, prediction, targets)
+                # v6: second forward on h-flipped image, used only for the
+                # `flip` loss term. We do NOT detach the inner activations;
+                # the loss graph through the second forward flows back into
+                # the model parameters.
+                flipped_image = torch.flip(image, dims=(-1,))
+                flipped_prediction = model(flipped_image, return_aux=True)
+                total, terms = criterion(
+                    image, mask, prediction, targets, flipped_prediction=flipped_prediction
+                )
                 scaled_total = total / accumulation
             assert_finite_batch(terms, sample_ids, "training")
             scaler.scale(scaled_total).backward()
@@ -421,8 +433,10 @@ def main() -> None:
         _write_log(
             log_path,
             f"[A] epoch {epoch}/{epochs} loss={averages['total']:.5f} "
-            f"presence={averages['presence']:.4f} amplitude={averages['amplitude']:.4f} "
-            f"sparse={averages['sparse']:.4f} "
+            f"rec={averages['rec']:.4f} bg={averages['bg']:.4f} "
+            f"sp={averages['sp']:.4f} ctr={averages['ctr']:.4f} "
+            f"psf={averages['psf']:.4f} ind={averages['ind']:.4f} "
+            f"flip={averages['flip']:.4f} amp={averages['amp']:.4f} "
             f"val_score={score:.5f} best={stopper.best_score:.5f} "
             f"centroid={float(validation.get('centroid_recall_5px_median', 0.0)):.3f} "
             f"falseS={float(validation.get('source_false_activation_median', 1.0)):.3f} "

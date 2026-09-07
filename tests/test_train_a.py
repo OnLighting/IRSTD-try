@@ -23,13 +23,15 @@ def test_load_config_exposes_only_public_configuration() -> None:
     assert config["run"]["seed"] == 42
 
 
-def test_v5_config_has_exact_dual_source_loss_weights() -> None:
+def test_v6_config_has_seven_loss_terms_with_uniform_weights() -> None:
+    """v6 spec: eight physics-named terms, all weights 1.0 except two
+    engineering constants in the implementation that don't surface as
+    weights (rec support_weight and psf usage_entropy_coef)."""
     config = load_config("configs/a_psf_irstd1k.py")
 
     assert set(config["loss"]["weights"]) == set(LOSS_NAMES)
-    assert config["loss"]["weights"]["presence"] == pytest.approx(0.5)
-    assert config["loss"]["weights"]["amplitude"] == pytest.approx(0.5)
-    assert config["loss"]["weights"]["target"] == pytest.approx(0.25)
+    for name in LOSS_NAMES:
+        assert config["loss"]["weights"][name] == pytest.approx(1.0), name
 
 
 def test_validation_score_rewards_interpretable_decomposition() -> None:
@@ -165,13 +167,17 @@ def test_resume_rejects_changed_training_objective() -> None:
         validate_resume_config(stale, current)
 
 
-def test_resume_rejects_v4_center_loss_configuration() -> None:
+def test_resume_rejects_stale_loss_term_configuration() -> None:
+    """Catches resuming after the loss-name set changed between experiments
+    (e.g. v5 -> v6 dropped ``target`` and ``residual`` in favour of
+    ``ind``). The configs are not interchangeable even if their numerical
+    values happen to match."""
     current = load_config("configs/a_psf_irstd1k.py")
     stale = dict(current)
     stale["loss"] = {"weights": dict(current["loss"]["weights"])}
-    stale["loss"]["weights"].pop("presence", None)
-    stale["loss"]["weights"].pop("amplitude", None)
-    stale["loss"]["weights"]["center"] = 0.5
+    # Drop a v6 term and reintroduce a v5 one; the key set must match.
+    stale["loss"]["weights"].pop("ind", None)
+    stale["loss"]["weights"]["target"] = 1.0
 
     with pytest.raises(ValueError, match="training config"):
         validate_resume_config(stale, current)

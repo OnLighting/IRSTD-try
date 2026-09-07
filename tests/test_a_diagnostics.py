@@ -10,6 +10,7 @@ from irstd_a.diagnostics import (
     compare_component_maps,
     component_diagnostics,
     degeneration_flags,
+    _coverage_at_5px,
 )
 
 
@@ -209,3 +210,36 @@ def test_component_comparison_detects_identity_and_change() -> None:
     assert identical["B"]["similarity"] > 0.999
     assert changed["B"]["normalized_l1"] > 0.9
     assert changed["S"]["similarity"] < identical["S"]["similarity"]
+
+
+def test_coverage_at_5px_marks_centres_inside_radius() -> None:
+    import numpy as np
+    presence = np.zeros((16, 16), dtype=np.float64)
+    center = np.zeros((16, 16), dtype=np.float64)
+    center[8, 8] = 1.0
+    # No strong presence anywhere -> 0.0.
+    assert _coverage_at_5px(presence, center) == 0.0
+    # On centre.
+    presence[8, 8] = 0.9
+    assert _coverage_at_5px(presence, center) == 1.0
+    # 4 px away -> still inside.
+    presence.fill(0.0)
+    presence[8, 12] = 0.9
+    assert _coverage_at_5px(presence, center) == 1.0
+    # 6 px away -> outside the 5px radius.
+    presence.fill(0.0)
+    presence[8, 14] = 0.9
+    assert _coverage_at_5px(presence, center) == 0.0
+
+
+def test_coverage_at_5px_is_per_centre() -> None:
+    import numpy as np
+    presence = np.zeros((16, 16), dtype=np.float64)
+    center = np.zeros((16, 16), dtype=np.float64)
+    center[8, 8] = 1.0
+    center[4, 12] = 1.0  # >5 px from (8,8)
+    presence[8, 8] = 0.9  # covers only first centre.
+    assert _coverage_at_5px(presence, center) == 0.5
+    presence[4, 12] = 0.9  # covers both.
+    assert _coverage_at_5px(presence, center) == 1.0
+

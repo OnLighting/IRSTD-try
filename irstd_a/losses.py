@@ -1,4 +1,14 @@
-"""Losses that constrain the otherwise non-identifiable PSF decomposition."""
+"""Losses that constrain the otherwise non-identifiable PSF decomposition.
+
+v6 design (2026-09-07): eight physics-named addends with weight 1.0 except
+for two engineering constants (rec support_weight=5.0 and psf usage
+entropy coefficient 0.1). The earlier v5 ten-term loss was reduced to
+this set after v5 in-domain results were clean but the public ``U`` was
+negative-Spearman against reconstruction error, ``S`` failed the
+horizontal-flip correlation gate, and five IRSTD-1K samples hit
+``centroid_recall=0`` with ``presence_at_centroid=1.0`` because the
+``presence`` BCE had no geometric signal.
+"""
 
 from __future__ import annotations
 
@@ -11,87 +21,176 @@ import torch.nn.functional as F
 from torch import Tensor
 
 
-LOSS_NAMES = (
-    "rec",
-    "bg",
-    "presence",
-    "amplitude",
-    "sparse",
-    "target",
-    "residual",
-    "independence",
-    "psf_diversity",
-    "uncertainty",
-)
+LOSS_NAMES = ("rec", "bg", "sp", "ctr", "psf", "ind", "flip", "amp")
 
 
-def _masked_mean(value: Tensor, mask: Tensor, eps: float = 1e-6) -> Tensor:
-    return (value * mask).sum() / mask.sum().clamp_min(eps)
-
-
-def _edge_aware_tv(value: Tensor, reference: Tensor) -> Tensor:
-    delta_x = value[..., :, 1:] - value[..., :, :-1]
-    delta_y = value[..., 1:, :] - value[..., :-1, :]
-    ref_x = reference[..., :, 1:] - reference[..., :, :-1]
-    ref_y = reference[..., 1:, :] - reference[..., :-1, :]
-    loss_x = (delta_x.abs() * torch.exp(-10.0 * ref_x.abs())).mean()
-    loss_y = (delta_y.abs() * torch.exp(-10.0 * ref_y.abs())).mean()
-    return loss_x + loss_y
-
-
-def _high_frequency(value: Tensor) -> Tensor:
-    return value - F.avg_pool2d(value, kernel_size=5, stride=1, padding=2)
+def _require_keys(container: Mapping, names: set[str], label: str) -> None:
+    missing = names - set(container)
+    if missing:
+        raise KeyError(f"{label} missing required keys: {sorted(missing)}")
 
 
 class APSFUnmixingLoss(nn.Module):
-    """Weighted reconstruction, weak-supervision, and anti-collapse objective."""
+    """Eight-term decomposition objective. All weights are 1.0."""
 
     def __init__(
         self,
         weights: Mapping[str, float],
+        sigma_min: float = 0.6,
+        sigma_max: float = 4.0,
     ) -> None:
         super().__init__()
         missing = set(LOSS_NAMES) - set(weights)
         extra = set(weights) - set(LOSS_NAMES)
         if missing or extra:
-            raise ValueError(f"loss weights mismatch: missing={sorted(missing)}, extra={sorted(extra)}")
+            raise ValueError(
+                f"loss weights mismatch: missing={sorted(missing)}, extra={sorted(extra)}"
+            )
         if any(float(weights[name]) < 0 for name in LOSS_NAMES):
             raise ValueError("loss weights must be non-negative")
+        if not 0 < float(sigma_min) < float(sigma_max):
+            raise ValueError("sigma bounds must satisfy 0 < sigma_min < sigma_max")
         self.weights = {name: float(weights[name]) for name in LOSS_NAMES}
+        self._sigma_min = float(sigma_min)
+        self._sigma_max = float(sigma_max)
+
+    # ------------------------------------------------------------------
+    # rec — area-weighted reconstruction (target support upweighted 5x)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _rec(image: Tensor, prediction: Mapping[str, Tensor], support: Tensor) -> Tensor:
+        support_weight = 5.0
+        recon = prediction["reconstruction_raw"]
+        inside_err = (image - recon).abs() * support
+        outside_err = (image - recon).abs() * (1.0 - support)
+        pixel_count = float(image.shape[-1] * image.shape[-2])
+        return (
+            inside_err.sum(dim=(-1, -2, -3)) * support_weight
+            + outside_err.sum(dim=(-1, -2, -3))
+        ).sum() / pixel_count
+
+    # ------------------------------------------------------------------
+    # bg — outside-target smoothness (TV outside support only)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _bg(background: Tensor, support: Tensor) -> Tensor:
+        dx = (background[..., :, 1:] - background[..., :, :-1]).abs()
+        dy = (background[..., 1:, :] - background[..., :-1, :]).abs()
+        dx_mask = 1.0 - support[..., :, 1:]
+        dy_mask = 1.0 - support[..., 1:, :]
+        return (dx * dx_mask).mean() + (dy * dy_mask).mean()
+
+    # ------------------------------------------------------------------
+    # sp — log-mass sparsity
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _sp(source: Tensor, center: Tensor) -> Tensor:
+        target_mass = (source * center).sum(dim=(-1, -2, -3))
+        outside_mass = (source * (1.0 - center)).sum(dim=(-1, -2, -3))
+        return torch.log1p(outside_mass / target_mass.clamp_min(1e-8)).mean()
+
+    # ------------------------------------------------------------------
+    # ctr — geometric localisation (BCE + worst-centre local maximum)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _ctr_bce(presence_logits: Tensor, center: Tensor) -> Tensor:
+        return (
+            center * F.softplus(-presence_logits)
+            + (1.0 - center) * F.softplus(presence_logits)
+        ).mean()
 
     @staticmethod
-    def _require_keys(container: Mapping, names: set[str], label: str) -> None:
-        missing = names - set(container)
-        if missing:
-            raise KeyError(f"{label} missing required keys: {sorted(missing)}")
+    def _ctr_local(presence_logits: Tensor, center: Tensor) -> Tensor:
+        P = torch.sigmoid(presence_logits)
+        # 11x11 window centred on output pixel (stride=1, padding=5).
+        local_max = F.max_pool2d(P, kernel_size=11, stride=1, padding=5)
+        penalty = F.relu(0.5 - local_max)
+        # Worst-centre penalty, restricted to true centres via `center`.
+        return (penalty * center).max()
 
+    @classmethod
+    def _ctr(cls, presence_logits: Tensor, center: Tensor) -> Tensor:
+        return cls._ctr_bce(presence_logits, center) + cls._ctr_local(presence_logits, center)
+
+    # ------------------------------------------------------------------
+    # psf — boundary penalty + usage entropy
+    # ------------------------------------------------------------------
     @staticmethod
-    def _psf_diversity(params: Mapping[str, Tensor]) -> Tensor:
+    def _psf(params: Mapping[str, Tensor], psf_weights: Tensor, sigma_min: float, sigma_max: float) -> Tensor:
         sigma_x = params["sigma_x"]
         sigma_y = params["sigma_y"]
-        theta = params["theta"]
-        if sigma_x.numel() < 2:
-            return sigma_x.new_zeros(())
-        vectors = torch.stack(
-            (
-                (sigma_x - 0.6) / 3.4,
-                (sigma_y - 0.6) / 3.4,
-                torch.sin(theta),
-                torch.cos(theta),
-            ),
-            dim=1,
-        )
-        distances = torch.pdist(vectors, p=2)
-        return F.relu(0.15 - distances).mean()
+        span = sigma_max - sigma_min
+        # Boundary penalty: relu on both sides of the [sigma_min, sigma_max] band.
+        boundary = (
+            F.relu(sigma_min - sigma_x)
+            + F.relu(sigma_x - sigma_max)
+            + F.relu(sigma_min - sigma_y)
+            + F.relu(sigma_y - sigma_max)
+        ).mean()
+        # Usage entropy across the kernel axis, normalised to [0, 1].
+        num_kernels = float(psf_weights.shape[1])
+        usage = psf_weights.mean(dim=(0, 2, 3))
+        usage_h = -(usage * torch.log(usage.clamp_min(1e-8))).sum() / math.log(num_kernels)
+        # Entropy term is bounded in [0, 1]; boundary is typically < 0.1,
+        # so a 0.1 coefficient keeps both on comparable scale.
+        return boundary - 0.1 * usage_h
 
+    # ------------------------------------------------------------------
+    # ind — component non-collapse
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _ind(
+        background: Tensor,
+        psf: Tensor,
+        residual: Tensor,
+        support: Tensor,
+    ) -> Tensor:
+        overlap_bt = (background * psf).mean()
+        overlap_rt = (residual * psf).mean()
+        outside_R = (residual * (1.0 - support)).mean()
+        return overlap_bt + overlap_rt + outside_R
+
+    # ------------------------------------------------------------------
+    # flip — input-flip equivariance on P and A
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _flip(prediction: Mapping[str, Tensor], flipped_prediction: Mapping[str, Tensor]) -> Tensor:
+        if "presence_logits" not in flipped_prediction or "amplitude_logits" not in flipped_prediction:
+            raise KeyError(
+                "flipped_prediction must contain 'presence_logits' and 'amplitude_logits'; "
+                "run model on flip(image, dims=[-1]) and pass the aux output"
+            )
+        P_orig = torch.sigmoid(prediction["presence_logits"])
+        A_orig = torch.sigmoid(prediction["amplitude_logits"])
+        P_flip = torch.sigmoid(flipped_prediction["presence_logits"])
+        A_flip = torch.sigmoid(flipped_prediction["amplitude_logits"])
+        p_diff = (P_flip - torch.flip(P_orig, dims=(-1,))).abs().mean()
+        a_diff = (A_flip - torch.flip(A_orig, dims=(-1,))).abs().mean()
+        return p_diff + a_diff
+
+    # ------------------------------------------------------------------
+    # amp — physical amplitude alignment (L1 to source_proxy)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _amp(amplitude_logits: Tensor, source_proxy: Tensor, center: Tensor) -> Tensor:
+        A = torch.sigmoid(amplitude_logits)
+        return (center * (A - source_proxy).abs()).mean()
+
+    # ------------------------------------------------------------------
+    # forward
+    # ------------------------------------------------------------------
     def forward(
         self,
         image: Tensor,
         mask: Tensor,
         prediction: Mapping[str, Tensor | Mapping[str, Tensor]],
         targets: Mapping[str, Tensor],
+        flipped_prediction: Mapping[str, Tensor | Mapping[str, Tensor]] | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
-        self._require_keys(
+        if image.shape != mask.shape:
+            raise ValueError("image and mask must have the same shape")
+
+        _require_keys(
             prediction,
             {
                 "B",
@@ -100,26 +199,22 @@ class APSFUnmixingLoss(nn.Module):
                 "amplitude_logits",
                 "T_psf_raw",
                 "R",
-                "u_rec",
+                "psf_weights",
                 "psf_params",
                 "reconstruction_raw",
             },
             "prediction",
         )
-        self._require_keys(
+        _require_keys(
             targets,
             {
                 "center",
                 "support",
                 "psf_support",
-                "local_background",
-                "target_proxy",
                 "source_proxy",
             },
             "targets",
         )
-        if image.shape != mask.shape:
-            raise ValueError("image and mask must have the same shape")
 
         background = prediction["B"]
         source = prediction["S"]
@@ -127,109 +222,38 @@ class APSFUnmixingLoss(nn.Module):
         amplitude_logits = prediction["amplitude_logits"]
         psf = prediction["T_psf_raw"]
         residual = prediction["R"]
-        uncertainty = prediction["u_rec"]
-        reconstruction = prediction["reconstruction_raw"]
+        psf_weights = prediction["psf_weights"]
         params = prediction["psf_params"]
-        if not all(isinstance(value, Tensor) for value in (background, source, psf, residual, uncertainty, reconstruction)):
-            raise TypeError("spatial prediction values must be tensors")
-        for name, logits in (("presence_logits", presence_logits), ("amplitude_logits", amplitude_logits)):
-            if not isinstance(logits, Tensor) or logits.shape != source.shape:
-                raise ValueError(f"prediction {name} must be a tensor matching S")
+        reconstruction = prediction["reconstruction_raw"]
         if not isinstance(params, Mapping):
             raise TypeError("psf_params must be a mapping")
-        self._require_keys(params, {"sigma_x", "sigma_y", "theta"}, "psf_params")
+        _require_keys(params, {"sigma_x", "sigma_y"}, "psf_params")
 
         support = targets["support"]
-        outside = 1.0 - support
-        psf_outside = 1.0 - targets["psf_support"]
         center = targets["center"]
         source_proxy = targets["source_proxy"]
-        local_background = targets["local_background"]
-        target_proxy = targets["target_proxy"]
-        error = image - reconstruction
-        scale = 0.01 + 0.49 * uncertainty.clamp(0.0, 1.0)
 
-        rec = (error.abs() / scale + torch.log(scale)).mean()
-        bg_outside = _masked_mean((background - image).abs(), outside)
-        bg_inside = _masked_mean((background - local_background).abs(), support)
-        bg = bg_outside + bg_inside + 0.1 * _edge_aware_tv(background, image)
-        source_float = source.float()
-        presence_loss = _masked_mean(
-            F.softplus(-presence_logits.float()),
-            center.float(),
-        ) + _masked_mean(
-            F.softplus(presence_logits.float()),
-            1.0 - center.float(),
-        )
-        amplitude_loss = _masked_mean(
-            F.binary_cross_entropy_with_logits(
-                amplitude_logits.float(),
-                source_proxy.float(),
-                reduction="none",
-            ),
-            center.float(),
-        )
-        noncenter_mass = (source_float * (1.0 - center.float())).sum(dim=(-1, -2, -3))
-        expected_source_mass = source_proxy.float().sum(dim=(-1, -2, -3))
-        # The energy ratio is physically meaningful but can be hundreds at
-        # sigmoid initialization.  log1p preserves ordering and a non-zero
-        # drive toward sparsity without overwhelming rare center gradients.
-        sparse = torch.log1p(
-            noncenter_mass / expected_source_mass.clamp_min(1e-3)
-        ).mean()
+        rec = self._rec(image, prediction, support)
+        bg = self._bg(background, support)
+        sp = self._sp(source, center)
+        ctr = self._ctr(presence_logits, center)
+        psf_term = self._psf(params, psf_weights, self._sigma_min, self._sigma_max)
+        ind = self._ind(background, psf, residual, support)
+        amp = self._amp(amplitude_logits, source_proxy, center)
+        if flipped_prediction is None:
+            flip = torch.zeros((), device=image.device, dtype=image.dtype)
+        else:
+            flip = self._flip(prediction, flipped_prediction)
 
-        target_output = psf + residual
-        spatial_dims = (-1, -2, -3)
-        proxy_energy = target_proxy.float().sum(dim=spatial_dims)
-        safe_proxy_energy = proxy_energy.clamp_min(1e-6)
-        target_fit = (
-            (target_output.float() - target_proxy.float()).abs() * support.float()
-        ).sum(dim=spatial_dims) / safe_proxy_energy
-        target_energy = (target_output.float() * support.float()).sum(dim=spatial_dims)
-        target_energy_error = (target_energy - proxy_energy).abs() / safe_proxy_energy
-        target_leakage = torch.log1p(
-            (target_output.float().abs() * psf_outside.float()).sum(dim=spatial_dims)
-            / safe_proxy_energy
-        )
-        present_target_loss = target_fit + target_energy_error + 2.0 * target_leakage
-        empty_target_loss = target_output.float().abs().mean(dim=spatial_dims)
-        target = torch.where(
-            proxy_energy > 1e-6,
-            present_target_loss,
-            empty_target_loss,
-        ).mean()
-
-        residual_loss = (
-            2.0 * _masked_mean(residual.abs(), outside)
-            + 0.1 * residual.abs().mean()
-            + 0.2 * _edge_aware_tv(residual, image)
-        )
-        overlap = (psf.abs() * residual.abs()).sum() / torch.sqrt(
-            psf.square().sum() * residual.square().sum()
-        ).clamp_min(1e-6)
-        background_detail = _high_frequency(background).abs()
-        target_detail = target_output.abs()
-        detail_overlap = (background_detail * target_detail).sum() / torch.sqrt(
-            background_detail.square().sum() * target_detail.square().sum()
-        ).clamp_min(1e-6)
-        independence = overlap + 0.25 * detail_overlap
-        psf_diversity = self._psf_diversity(params)
-
-        detached_error = error.detach().abs()
-        error_scale = detached_error / detached_error.amax(dim=(-1, -2), keepdim=True).clamp_min(1e-6)
-        uncertainty_loss = F.l1_loss(uncertainty, error_scale) + 0.1 * uncertainty.mean()
-
-        raw_terms = {
+        raw_terms: dict[str, Tensor] = {
             "rec": rec,
             "bg": bg,
-            "presence": presence_loss,
-            "amplitude": amplitude_loss,
-            "sparse": sparse,
-            "target": target,
-            "residual": residual_loss,
-            "independence": independence,
-            "psf_diversity": psf_diversity,
-            "uncertainty": uncertainty_loss,
+            "sp": sp,
+            "ctr": ctr,
+            "psf": psf_term,
+            "ind": ind,
+            "flip": flip,
+            "amp": amp,
         }
         for name, value in raw_terms.items():
             if not torch.isfinite(value):

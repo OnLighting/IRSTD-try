@@ -26,14 +26,12 @@ loss = dict(
     weights=dict(
         rec=1.0,
         bg=1.0,
-        presence=0.5,
-        amplitude=0.5,
-        sparse=0.01,
-        target=0.25,
-        residual=0.05,
-        independence=0.05,
-        psf_diversity=0.01,
-        uncertainty=0.01,
+        sp=1.0,
+        ctr=1.0,
+        psf=1.0,
+        ind=1.0,
+        flip=1.0,
+        amp=1.0,
     ),
 )
 
@@ -67,7 +65,9 @@ diagnostics = dict(
         target_psf_zero_fraction_max=0.25,
         background_input_correlation_max=0.999,
         flip_intensity_correlation_min=0.90,
+        flip_S_pearson_min=0.90,
         noise_correlation_min=0.80,
+        coverage_at_5px_min=0.85,
     ),
 )
 

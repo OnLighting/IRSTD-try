@@ -1,8 +1,7 @@
 # G0 Baseline (I-only Swin-UNet)
 
-> Implements the first step of `docs/irstd_research_direction_decision_record.md`:
-> build a reliable I-only lightweight segmentation baseline before introducing
-> PSF unmixing (A) or conditional diffusion (B).
+Reliable I-only lightweight segmentation baseline for infrared small-target
+detection.
 
 ## Contract
 
@@ -16,8 +15,8 @@ into label leakage.
 
 ## Backbone
 
-Minimal Swin-UNet (decision record §pain point 2 — local window attention,
-high-resolution skip connections, no repeated mean/max pooling). Default
+Minimal Swin-UNet with local window attention, high-resolution skip connections,
+and no repeated mean/max pooling. Default
 config: `dims=(48,96,192)`, `depths=(2,2,2)`, `window_size=8`, params ≈ 6 M
 at 512×512.
 
@@ -27,7 +26,7 @@ at 512×512.
 
 ## Reported metrics
 
-Per the decision record §evaluation, G0 reports:
+G0 reports:
 
 - **Pixel:** IoU (mean over images), nIoU (per-image IoU averaged).
 - **Target:** Pd (image-level detection probability), Fa (false alarms per
@@ -51,12 +50,10 @@ deferred until G0 numbers are stable.
 
 ## What G0 does NOT include
 
-- No PSF decomposition (direction A) — added only after G0 establishes the
-  reference numbers.
-- No conditional diffusion (direction B).
+- No PSF decomposition or conditional diffusion.
 - No target-level loss yet — added after G0 confirms pixel-level behaviour.
 - No error-structure classification — added after G0 numbers are stable.
-- No language / ViT branch — out of scope per decision record §current model.
+- No language / ViT branch.
 - No tests written — the user explicitly requested none.
 
 ## How to run
@@ -75,10 +72,3 @@ python eval_g0.py --checkpoint runs/g0/g0_last.pt
 2. Cross-dataset eval writes a metrics JSON with explicit match_rule.
 3. Params < 30 M, FLOPs reported (install `thop` for the count).
 4. No code path reads `Y` outside `losses.py` / `metrics.py`.
-
-## Next research stage
-
-After fixing the G0-best reference numbers, train and audit the independent
-background-aware sparse PSF decomposer described in `README_A.md`. Stage A is
-kept separate from G0: it must first demonstrate interpretable `B`, `S`,
-`T_psf`, `R`, and `U` outputs before any G1--G5 fusion experiment begins.

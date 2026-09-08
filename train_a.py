@@ -58,7 +58,11 @@ def validation_score(summary: Mapping[str, Any]) -> float:
     precision = value("target_energy_precision_median", 0.0)
     recall = value("target_contrast_recall_median", 0.0)
     source_false = value("source_false_activation_median", 1.0)
-    centroid_recall = value("centroid_recall_5px_median", 0.0)
+    centroid_recall = value(
+        "centroid_recall_5px_mean", value("centroid_recall_5px_median", 0.0)
+    )
+    centroid_tail = value("centroid_recall_5px_failure_tail", centroid_recall)
+    uncertainty_spearman = value("uncertainty_error_spearman_median", -1.0)
     background_leakage = value("background_target_leakage_median", 1.0)
     overlap = value("psf_residual_overlap_median", 1.0)
     residual_target = value("residual_target_fraction_median", 1.0)
@@ -69,6 +73,8 @@ def validation_score(summary: Mapping[str, Any]) -> float:
         + 0.25 * recall_error
         + 0.5 * source_false
         + 0.5 * (1.0 - min(max(centroid_recall, 0.0), 1.0))
+        + 0.5 * (1.0 - min(max(centroid_tail, 0.0), 1.0))
+        + 0.25 * (1.0 - min(max(uncertainty_spearman, -1.0), 1.0))
         + 0.5 * background_leakage
         + 0.1 * overlap
         + 0.25 * residual_target

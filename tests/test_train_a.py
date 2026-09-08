@@ -23,13 +23,13 @@ def test_load_config_exposes_only_public_configuration() -> None:
     assert config["run"]["seed"] == 42
 
 
-def test_v6_config_has_seven_loss_terms_with_uniform_weights() -> None:
+def test_v6_config_has_eight_loss_terms_with_uniform_weights() -> None:
     """v6 spec: eight physics-named terms, all weights 1.0 except two
     engineering constants in the implementation that don't surface as
     weights (rec support_weight and psf usage_entropy_coef)."""
     config = load_config("configs/a_psf_irstd1k.py")
 
-    assert config["loss"]["objective_version"] == "v6.1"
+    assert config["loss"]["objective_version"] == "v6.2"
     assert set(config["loss"]["weights"]) == set(LOSS_NAMES)
     for name in LOSS_NAMES:
         assert config["loss"]["weights"][name] == pytest.approx(1.0), name
@@ -98,6 +98,28 @@ def test_validation_score_penalizes_unlocalized_source_map() -> None:
     unlocalized = dict(localized, centroid_recall_5px_median=0.0)
 
     assert validation_score(localized) < validation_score(unlocalized)
+
+
+def test_validation_score_covers_acceptance_only_failure_modes() -> None:
+    good = {
+        "reconstruction_mae_mean": 0.02,
+        "target_energy_precision_median": 0.9,
+        "target_contrast_recall_median": 1.0,
+        "source_false_activation_median": 0.1,
+        "centroid_recall_5px_mean": 0.95,
+        "centroid_recall_5px_failure_tail": 0.8,
+        "uncertainty_error_spearman_median": 0.5,
+        "background_target_leakage_median": 0.1,
+        "psf_residual_overlap_median": 0.2,
+        "residual_target_fraction_median": 0.1,
+    }
+    bad = dict(
+        good,
+        centroid_recall_5px_mean=0.7,
+        centroid_recall_5px_failure_tail=0.0,
+        uncertainty_error_spearman_median=-0.5,
+    )
+    assert validation_score(good) < validation_score(bad)
 
 
 def test_assert_finite_batch_reports_sample_ids() -> None:

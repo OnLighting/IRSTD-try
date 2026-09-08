@@ -1,4 +1,4 @@
-"""Tests for the Stage-A v6 seven-loss objective.
+"""Tests for the Stage-A v6.2 eight-loss objective.
 
 Each test corresponds to one row of the v6 spec test matrix (T1..T20).
 These tests are written and observed failing **before** the new
@@ -145,7 +145,7 @@ def test_rec_prefers_a_calibrated_target_component() -> None:
 
 
 # ---------------------------------------------------------------------------
-# bg — outside-target smoothness (T3, T4)
+# bg — direct background fidelity (T3, T4)
 # ---------------------------------------------------------------------------
 
 
@@ -163,36 +163,25 @@ def test_bg_zero_on_smooth_input() -> None:
     assert terms["bg"].item() < 1e-6
 
 
-def test_bg_unconstrained_inside_support() -> None:
-    """A B gradient strictly inside target support must not contribute to bg.
-
-    With dilation_radius=2 the support for a 2x2 mask at (15:17, 15:17) is
-    a 7x7 block from (13:20, 13:20) with the final row/col = 0. A B change
-    that stays at rows 13..18 stays fully inside the support and must
-    not affect bg.
-    """
+def test_bg_matches_image_outside_and_local_background_inside_support() -> None:
+    """B must reproduce the scene rather than merely become smooth."""
     from irstd_a.losses import APSFUnmixingLoss
 
     image, mask = _synthetic_batch()
     targets = build_weak_targets(image, mask, dilation_radius=2, ring_radius=5)
-    support = targets["support"]
-    # Confirm the assumption: rows 13..18 inclusive are inside support for
-    # the first image; row 19 is the boundary.
-    assert support[0, 0, 13:19, 13:19].all()
-    assert not support[0, 0, 19, 19]
-
     weights = {name: 1.0 for name in LOSS_NAMES_V6}
+    matched = _controlled_prediction(image)
+    matched["B"] = torch.where(
+        targets["support"].bool(), targets["local_background"], image
+    )
+    wrong = copy.deepcopy(matched)
+    wrong["B"] = (wrong["B"] + 0.2).clamp_max(1.0)
 
-    inside = _controlled_prediction(image)
-    inside["B"][0:1, :, 13:18, 13:18] = 0.5  # strictly inside support
+    _, matched_terms = APSFUnmixingLoss(weights)(image, mask, matched, targets)
+    _, wrong_terms = APSFUnmixingLoss(weights)(image, mask, wrong, targets)
 
-    outside = _controlled_prediction(image)
-    # outside: leave B equal to image (no gradient anywhere)
-
-    _, inside_terms = APSFUnmixingLoss(weights)(image, mask, inside, targets)
-    _, outside_terms = APSFUnmixingLoss(weights)(image, mask, outside, targets)
-
-    assert inside_terms["bg"].item() == pytest.approx(outside_terms["bg"].item(), abs=1e-5)
+    assert matched_terms["bg"].item() < 1e-6
+    assert wrong_terms["bg"].item() > matched_terms["bg"].item() + 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -461,8 +450,7 @@ def test_ind_suppresses_psf_residual_overlap() -> None:
 
 
 def test_flip_zero_under_equivariant_input() -> None:
-    """If the model's P output is exactly the horizontal flip of P(flip(I)),
-    flip loss must be zero."""
+    """The evaluated source map S is the flip-equivariant quantity."""
     from irstd_a.losses import APSFUnmixingLoss
 
     image, mask = _synthetic_batch()
@@ -470,18 +458,14 @@ def test_flip_zero_under_equivariant_input() -> None:
     weights = {name: 1.0 for name in LOSS_NAMES_V6}
 
     prediction = _controlled_prediction(image)
-    # Build a presence_logits that is exactly equivariant under h-flip.
-    base = torch.full_like(image, -10.0)
+    base = torch.zeros_like(image)
     base[0, 0, 15, 15] = 4.0
     base[1, 0, 8, 23] = 4.0
-    prediction["presence_logits"] = base
-    prediction["amplitude_logits"] = torch.full_like(image, 0.5)
+    prediction["S"] = base
 
     flipped_image = _flip_h(image)
     flipped_prediction = _controlled_prediction(flipped_image)
-    flipped_base = _flip_h(base)
-    flipped_prediction["presence_logits"] = flipped_base
-    flipped_prediction["amplitude_logits"] = torch.full_like(flipped_image, 0.5)
+    flipped_prediction["S"] = _flip_h(base)
 
     _, terms = APSFUnmixingLoss(weights)(
         image, mask, prediction, targets, flipped_prediction=flipped_prediction
@@ -490,8 +474,7 @@ def test_flip_zero_under_equivariant_input() -> None:
 
 
 def test_flip_pulls_misaligned_presence() -> None:
-    """Presence logits that are not equivariant under h-flip must produce a
-    positive flip loss."""
+    """A spatially misaligned final S must produce positive flip loss."""
     from irstd_a.losses import APSFUnmixingLoss
 
     image, mask = _synthetic_batch()
@@ -499,11 +482,10 @@ def test_flip_pulls_misaligned_presence() -> None:
     weights = {name: 1.0 for name in LOSS_NAMES_V6}
 
     prediction = _controlled_prediction(image)
-    base = torch.full_like(image, -10.0)
+    base = torch.zeros_like(image)
     base[0, 0, 15, 15] = 4.0
     base[1, 0, 8, 23] = 4.0
-    prediction["presence_logits"] = base
-    prediction["amplitude_logits"] = torch.full_like(image, 0.5)
+    prediction["S"] = base
 
     # Flipped forward that is NOT equivariant: place a bright source at a
     # different location after flipping.
@@ -512,9 +494,8 @@ def test_flip_pulls_misaligned_presence() -> None:
     wrong_base = _flip_h(base)
     # Shift the bright spike by 3 px in the flipped image.
     wrong_base[0, 0, 15, 18] = 4.0
-    wrong_base[0, 0, 15, 15] = -10.0
-    flipped_prediction["presence_logits"] = wrong_base
-    flipped_prediction["amplitude_logits"] = torch.full_like(flipped_image, 0.5)
+    wrong_base[0, 0, 15, 15] = 0.0
+    flipped_prediction["S"] = wrong_base
 
     _, terms = APSFUnmixingLoss(weights)(
         image, mask, prediction, targets, flipped_prediction=flipped_prediction
@@ -541,14 +522,14 @@ def test_flip_penalty_is_not_diluted_by_image_area() -> None:
         prediction = _controlled_prediction(image)
         logits = torch.full_like(image, -10.0)
         logits[..., size // 2, size // 2] = 6.0
-        prediction["presence_logits"] = logits
+        prediction["S"] = torch.sigmoid(logits)
 
         flipped_prediction = _controlled_prediction(_flip_h(image))
         wrong = _flip_h(logits)
         expected_x = size - 1 - size // 2
         wrong[..., size // 2, expected_x] = -10.0
         wrong[..., size // 2, expected_x - 3] = 6.0
-        flipped_prediction["presence_logits"] = wrong
+        flipped_prediction["S"] = torch.sigmoid(wrong)
 
         _, terms = APSFUnmixingLoss(weights)(
             image, mask, prediction, targets, flipped_prediction=flipped_prediction
@@ -564,7 +545,7 @@ def test_flip_penalty_is_not_diluted_by_image_area() -> None:
 
 
 def test_amp_zero_when_matched_to_source_proxy() -> None:
-    """When A exactly equals source_proxy at the centre, amp must be ~0."""
+    """When final S equals source_proxy at the centre, amp must be ~0."""
     from irstd_a.losses import APSFUnmixingLoss
 
     image = torch.full((1, 1, 32, 32), 0.2)
@@ -575,13 +556,8 @@ def test_amp_zero_when_matched_to_source_proxy() -> None:
     weights = {name: 1.0 for name in LOSS_NAMES_V6}
 
     prediction = _controlled_prediction(image)
-    matched_amp = torch.zeros_like(image)
     centre_mask = targets["center"].bool()
-    matched_amp[centre_mask] = torch.logit(
-        targets["source_proxy"][centre_mask].clamp(1e-6, 1 - 1e-6)
-    )
-    prediction["amplitude_logits"] = matched_amp
-    prediction["source_amplitude"] = torch.sigmoid(matched_amp)
+    prediction["S"][centre_mask] = targets["source_proxy"][centre_mask]
 
     _, terms = APSFUnmixingLoss(weights)(image, mask, prediction, targets)
     assert terms["amp"].item() < 1e-3
@@ -600,18 +576,10 @@ def test_amp_penalises_binary_overshoot() -> None:
 
     matched = _controlled_prediction(image)
     centre_mask = targets["center"].bool()
-    matched_logits = torch.full_like(image, -10.0)
-    matched_logits[centre_mask] = torch.logit(
-        targets["source_proxy"][centre_mask].clamp(1e-6, 1 - 1e-6)
-    )
-    matched["amplitude_logits"] = matched_logits
-    matched["source_amplitude"] = torch.sigmoid(matched_logits)
+    matched["S"][centre_mask] = targets["source_proxy"][centre_mask]
 
     overshoot = copy.deepcopy(matched)
-    overshoot_logits = torch.full_like(image, -10.0)
-    overshoot_logits[centre_mask] = 14.0  # saturates to ~1.0
-    overshoot["amplitude_logits"] = overshoot_logits
-    overshoot["source_amplitude"] = torch.sigmoid(overshoot_logits)
+    overshoot["S"][centre_mask] = 1.0
 
     _, matched_terms = APSFUnmixingLoss(weights)(image, mask, matched, targets)
     _, over_terms = APSFUnmixingLoss(weights)(image, mask, overshoot, targets)
@@ -631,7 +599,7 @@ def test_amp_is_not_diluted_by_image_area() -> None:
         mask[..., size // 2, size // 2] = 1
         targets = build_weak_targets(image, mask, dilation_radius=2, ring_radius=5)
         prediction = _controlled_prediction(image)
-        prediction["amplitude_logits"] = torch.full_like(image, 14.0)
+        prediction["S"][targets["center"].bool()] = 1.0
         _, terms = APSFUnmixingLoss(weights)(image, mask, prediction, targets)
         losses.append(float(terms["amp"]))
 
@@ -665,15 +633,14 @@ def test_total_loss_is_finite_and_backpropagates_to_every_head() -> None:
     assert torch.isfinite(total)
 
     total.backward()
-    # Heads that participate in v6 loss terms MUST receive gradient.
-    # `uncertainty_head` does NOT participate in v6 loss (U is reported but
-    # only trained via eval-side Spearman monitoring), so it is excluded.
+    # Every public learned head participates in the objective.
     for head in (
         "background_head",
         "presence_head",
         "amplitude_head",
         "residual_head",
         "mixing_head",
+        "uncertainty_head",
     ):
         module = getattr(model, head)
         assert any(
@@ -687,35 +654,27 @@ def test_total_loss_is_finite_and_backpropagates_to_every_head() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_U_is_excluded_from_loss_graph() -> None:
-    """The public U must not appear in the loss computation graph.
-
-    U is reported as a model output but trained only via Spearman
-    monitoring on the eval side. Including U in the loss would create a
-    shortcut where minimising the loss collapses U to zero.
-
-    The contract is "no path at all" between ``terms['total']`` and
-    ``prediction['U']``: the total loss tensor must have an empty
-    ``grad_fn`` chain reaching U. We verify by attempting to take a
-    gradient and expecting either None (no path) or an explicit
-    RuntimeError raised by autograd when the leaf has no grad_fn.
-    """
+def test_U_is_trained_toward_detached_normalized_reconstruction_error() -> None:
+    """U receives a gradient, while reconstruction cannot game its target."""
     from irstd_a.losses import APSFUnmixingLoss
 
     image, mask = _synthetic_batch()
     targets = build_weak_targets(image, mask, dilation_radius=2, ring_radius=5)
     weights = {name: 1.0 for name in LOSS_NAMES_V6}
     prediction = _controlled_prediction(image)
-    prediction["U"] = torch.full_like(image, 0.95, requires_grad=True)
+    reconstruction = image.clone().requires_grad_()
+    reconstruction.data[..., 0, 0] = 0.0
+    prediction["reconstruction_raw"] = reconstruction
+    prediction["U"] = torch.full_like(image, 0.5, requires_grad=True)
 
     _, terms = APSFUnmixingLoss(weights)(image, mask, prediction, targets)
-    total = terms["total"]
-    try:
-        gradient = torch.autograd.grad(total, prediction["U"], allow_unused=True)[0]
-        assert gradient is None
-    except RuntimeError:
-        # U was not in the graph at all -- autograd raises before returning None.
-        pass
+    u_gradient, reconstruction_gradient = torch.autograd.grad(
+        terms["rec"], (prediction["U"], reconstruction)
+    )
+    assert u_gradient.abs().sum() > 0
+    # Reconstruction still gets only its direct reconstruction/calibration
+    # gradient; the uncertainty target is detached.
+    assert torch.isfinite(reconstruction_gradient).all()
 
 
 def test_public_U_equals_sigmoid_u_rec_head() -> None:

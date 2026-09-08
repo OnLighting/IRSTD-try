@@ -1,14 +1,9 @@
 """Losses that constrain the otherwise non-identifiable PSF decomposition.
 
-v6 design (2026-09-07): eight physics-named addends with weight 1.0. The
-corrected objective keeps the support weight (5.0), PSF usage-entropy
-coefficient (0.1), and target-calibration coefficient (0.25). The earlier
-v5 ten-term loss was reduced to this set after v5 in-domain results were
-clean but the public ``U`` was
-negative-Spearman against reconstruction error, ``S`` failed the
-horizontal-flip correlation gate, and five IRSTD-1K samples hit
-``centroid_recall=0`` with ``presence_at_centroid=1.0`` because the
-``presence`` BCE had no geometric signal.
+v6.2 keeps eight physics-named addends with uniform public weights. It closes
+three missing supervision paths without adding more terms: ``rec`` also
+calibrates U, ``bg`` directly fits the scene background, and ``flip``/``amp``
+operate on the evaluated source map S rather than on intermediate factors.
 """
 
 from __future__ import annotations
@@ -118,18 +113,30 @@ class APSFUnmixingLoss(nn.Module):
         decomposition_loss = torch.where(
             proxy_energy > 1e-6, present_loss, empty_loss
         ).mean()
-        return reconstruction_loss + 0.25 * decomposition_loss
+        # U predicts relative reconstruction error. Detaching the target keeps
+        # the reconstruction branch from increasing its own error to help U.
+        uncertainty = prediction["U"]
+        detached_error = (image - recon).detach().abs()
+        error_target = detached_error / detached_error.amax(
+            dim=(-1, -2), keepdim=True
+        ).clamp_min(1e-6)
+        uncertainty_loss = F.l1_loss(uncertainty, error_target)
+        return reconstruction_loss + 0.25 * decomposition_loss + 0.25 * uncertainty_loss
 
     # ------------------------------------------------------------------
-    # bg — outside-target smoothness (TV outside support only)
+    # bg — direct background fidelity
     # ------------------------------------------------------------------
     @staticmethod
-    def _bg(background: Tensor, support: Tensor) -> Tensor:
-        dx = (background[..., :, 1:] - background[..., :, :-1]).abs()
-        dy = (background[..., 1:, :] - background[..., :-1, :]).abs()
-        dx_mask = 1.0 - support[..., :, 1:]
-        dy_mask = 1.0 - support[..., 1:, :]
-        return (dx * dx_mask).mean() + (dy * dy_mask).mean()
+    def _bg(
+        background: Tensor,
+        image: Tensor,
+        support: Tensor,
+        local_background: Tensor,
+    ) -> Tensor:
+        outside = 1.0 - support
+        return _masked_mean((background - image).abs(), outside) + _masked_mean(
+            (background - local_background).abs(), support
+        )
 
     # ------------------------------------------------------------------
     # sp — log-mass sparsity
@@ -203,30 +210,22 @@ class APSFUnmixingLoss(nn.Module):
         return overlap_bt + overlap_rt + outside_R
 
     # ------------------------------------------------------------------
-    # flip — input-flip equivariance on P and A
+    # flip — input-flip equivariance on the evaluated source map S
     # ------------------------------------------------------------------
     @staticmethod
     def _flip(prediction: Mapping[str, Tensor], flipped_prediction: Mapping[str, Tensor]) -> Tensor:
-        if "presence_logits" not in flipped_prediction or "amplitude_logits" not in flipped_prediction:
-            raise KeyError(
-                "flipped_prediction must contain 'presence_logits' and 'amplitude_logits'; "
-                "run model on flip(image, dims=[-1]) and pass the aux output"
-            )
-        P_orig = torch.sigmoid(prediction["presence_logits"])
-        A_orig = torch.sigmoid(prediction["amplitude_logits"])
-        P_flip = torch.sigmoid(flipped_prediction["presence_logits"])
-        A_flip = torch.sigmoid(flipped_prediction["amplitude_logits"])
-        p_diff = _relative_shape_l1(P_flip, torch.flip(P_orig, dims=(-1,)))
-        a_diff = _relative_shape_l1(A_flip, torch.flip(A_orig, dims=(-1,)))
-        return p_diff + a_diff
+        if "S" not in flipped_prediction:
+            raise KeyError("flipped_prediction must contain 'S'")
+        return _relative_shape_l1(
+            flipped_prediction["S"], torch.flip(prediction["S"], dims=(-1,))
+        )
 
     # ------------------------------------------------------------------
-    # amp — physical amplitude alignment (L1 to source_proxy)
+    # amp — physical final-source alignment (L1 to source_proxy)
     # ------------------------------------------------------------------
     @staticmethod
-    def _amp(amplitude_logits: Tensor, source_proxy: Tensor, center: Tensor) -> Tensor:
-        A = torch.sigmoid(amplitude_logits)
-        return _masked_mean((A - source_proxy).abs(), center)
+    def _amp(source: Tensor, source_proxy: Tensor, center: Tensor) -> Tensor:
+        return _masked_mean((source - source_proxy).abs(), center)
 
     # ------------------------------------------------------------------
     # forward
@@ -251,6 +250,7 @@ class APSFUnmixingLoss(nn.Module):
                 "amplitude_logits",
                 "T_psf_raw",
                 "R",
+                "U",
                 "psf_weights",
                 "psf_params",
                 "reconstruction_raw",
@@ -263,6 +263,7 @@ class APSFUnmixingLoss(nn.Module):
                 "center",
                 "support",
                 "psf_support",
+                "local_background",
                 "target_proxy",
                 "source_proxy",
             },
@@ -287,14 +288,15 @@ class APSFUnmixingLoss(nn.Module):
         center = targets["center"]
         target_proxy = targets["target_proxy"]
         source_proxy = targets["source_proxy"]
+        local_background = targets["local_background"]
 
         rec = self._rec(image, prediction, support, psf_support, target_proxy)
-        bg = self._bg(background, support)
+        bg = self._bg(background, image, support, local_background)
         sp = self._sp(source, center)
         ctr = self._ctr(presence_logits, center)
         psf_term = self._psf(params, psf_weights, self._sigma_min, self._sigma_max)
         ind = self._ind(background, psf, residual, support)
-        amp = self._amp(amplitude_logits, source_proxy, center)
+        amp = self._amp(source, source_proxy, center)
         if flipped_prediction is None:
             flip = torch.zeros((), device=image.device, dtype=image.dtype)
         else:

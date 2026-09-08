@@ -166,6 +166,17 @@ def test_aggregate_reports_valid_counts_and_medians() -> None:
     assert summary["residual_meaningful_fraction"] == 1.0
 
 
+def test_aggregate_reports_centroid_failure_tail() -> None:
+    records = [
+        {"has_target": True, "centroid_recall_5px": value}
+        for value in (0.0, 0.4, 0.8, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    ]
+
+    summary = aggregate_diagnostics(records)
+
+    assert summary["centroid_recall_5px_failure_tail"] == pytest.approx(0.0)
+
+
 def test_degeneration_flags_detect_known_collapses() -> None:
     summary = {
         "source_false_activation_median": 0.91,
@@ -242,4 +253,3 @@ def test_coverage_at_5px_is_per_centre() -> None:
     assert _coverage_at_5px(presence, center) == 0.5
     presence[4, 12] = 0.9  # covers both.
     assert _coverage_at_5px(presence, center) == 1.0
-

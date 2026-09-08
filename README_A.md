@@ -1,4 +1,4 @@
-# Stage A v6: Seven-Loss Background-Aware Sparse PSF Unmixing
+# Stage A v6.2: Eight-Loss Background-Aware Sparse PSF Unmixing
 
 Stage A v6 is trained independently after the G0 image-only baseline. It
 accepts only a normalized infrared image `I` and returns five full-resolution
@@ -33,18 +33,21 @@ differences from v5:
    decomposition; sparse `ctr`, `amp`, and `flip` supervision is normalized
    independently of image area. The internal non-unit coefficients are:
    `rec` upweights target support by 5x, restores target calibration at
-   0.25, and `psf` uses a 0.1 usage-entropy coefficient.
+   0.25, and calibrates `U` to detached normalized reconstruction error at
+   0.25. `bg` directly fits the observed background instead of only imposing
+   smoothness; `psf` uses a 0.1 usage-entropy coefficient.
 
 2. **Public `U` is single-construct.** v5 mixed 0.75·u_rec + 0.25·psf_entropy
    in the public output while only supervising u_rec with the loss. The
    result was a Spearman correlation against reconstruction error of −0.21.
-   v6 public `U = sigmoid(uncertainty_head(features))` exactly; psf_entropy
-   is exposed only as an aux diagnostic.
+   v6.2 public `U = sigmoid(uncertainty_head(features))` exactly and trains it
+   against detached normalized reconstruction error; psf_entropy is exposed
+   only as an aux diagnostic.
 
-3. **Explicit h-flip equivariance on P and A.** v5 had no paired-flip
+3. **Explicit h-flip equivariance on final S.** v5 had no paired-flip
    constraint; the v5 S horizontal-flip Pearson was 0.78. v6 runs a
    second forward on `flip(I, dims=[-1])` per training step and adds a
-   `flip` loss term that penalises non-equivariant P/A outputs.
+   `flip` loss term that penalises the same final `S` map used by acceptance.
 
 4. **Geometric `ctr_local` for the XDU9-class failures.** v5 had five
    IRSTD-1K samples (XDU9, XDU999, XDU733, XDU302, XDU167) where
@@ -87,7 +90,7 @@ cross-domain result.
 | `train_a.py` | AMP training with paired h-flip forward. |
 | `eval_a.py` | Cross-dataset diagnostics, stability, and v6 gate reporting. |
 | `visualize_a.py` | Nine-panel component audits and PSF kernel sheet. |
-| `run_a_v6_1_remote.sh` | Corrected one-shot CUDA + tests + training + evaluation + strict gates + packaging. |
+| `run_a_v6_2_remote.sh` | Minimal corrected objective: tests + training + evaluation + strict gates + packaging. |
 | `run_a_v6_remote.sh` | Historical v6 runner retained for comparison. |
 
 ## Remote environment
@@ -156,7 +159,7 @@ artifact packaging without idle hand-offs:
 
 ```bash
 cd /path/to/new_model_v3
-bash run_a_v6_1_remote.sh
+bash run_a_v6_2_remote.sh
 ```
 
 Override `RUN_DIR`, `CONFIG`, `DEVICE`, or `SEED` as environment variables
@@ -166,7 +169,7 @@ only when intentionally creating a different experiment.
 cd /path/to/new_model_v3
 set -euo pipefail
 mkdir -p runs/a_psf
-RUN_DIR="runs/a_psf/irstd1k_seed42_v6_1_corrected"
+RUN_DIR="runs/a_psf/irstd1k_seed42_v6_2"
 
 python train_a.py \
   --config configs/a_psf_irstd1k.py \
@@ -179,24 +182,24 @@ If interrupted, resume without creating a new split:
 ```bash
 python train_a.py \
   --config configs/a_psf_irstd1k.py \
-  --run-dir runs/a_psf/irstd1k_seed42_v6_1_corrected \
-  --resume runs/a_psf/irstd1k_seed42_v6_1_corrected/a_last.pt \
-  --device cuda --seed 42 2>&1 | tee -a runs/a_psf/irstd1k_seed42_v6_1_corrected_console.log
+  --run-dir runs/a_psf/irstd1k_seed42_v6_2 \
+  --resume runs/a_psf/irstd1k_seed42_v6_2/a_last.pt \
+  --device cuda --seed 42 2>&1 | tee -a runs/a_psf/irstd1k_seed42_v6_2_console.log
 ```
 
 ## Formal evaluation and visualization
 
 ```bash
 python eval_a.py \
-  --checkpoint runs/a_psf/irstd1k_seed42_v6_1_corrected/a_best.pt \
-  --run-dir runs/a_psf/irstd1k_seed42_v6_1_corrected \
+  --checkpoint runs/a_psf/irstd1k_seed42_v6_2/a_best.pt \
+  --run-dir runs/a_psf/irstd1k_seed42_v6_2 \
   --datasets irstd1k sirst_uavb sirst4 \
   --probe-count 8 --device cuda
 
 python visualize_a.py \
-  --checkpoint runs/a_psf/irstd1k_seed42_v6_1_corrected/a_best.pt \
-  --metrics runs/a_psf/irstd1k_seed42_v6_1_corrected/per_image_metrics.csv \
-  --output-dir runs/a_psf/irstd1k_seed42_v6_1_corrected/visualizations \
+  --checkpoint runs/a_psf/irstd1k_seed42_v6_2/a_best.pt \
+  --metrics runs/a_psf/irstd1k_seed42_v6_2/per_image_metrics.csv \
+  --output-dir runs/a_psf/irstd1k_seed42_v6_2/visualizations \
   --max-panels 12 --device cuda
 ```
 

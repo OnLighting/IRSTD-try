@@ -283,6 +283,16 @@ def aggregate_diagnostics(records: Sequence[Mapping]) -> dict:
         if target_records
         else None
     )
+    centroid_recalls = sorted(
+        float(record["centroid_recall_5px"])
+        for record in target_records
+        if isinstance(record.get("centroid_recall_5px"), (int, float))
+        and np.isfinite(record["centroid_recall_5px"])
+    )
+    worst_count = max(1, math.ceil(0.10 * len(centroid_recalls))) if centroid_recalls else 0
+    summary["centroid_recall_5px_failure_tail"] = (
+        float(min(centroid_recalls[:worst_count])) if worst_count else None
+    )
     return summary
 
 

@@ -117,6 +117,33 @@ def test_rec_upweights_target_support() -> None:
     assert inside_terms["rec"] > outside_terms["rec"]
 
 
+def test_rec_prefers_a_calibrated_target_component() -> None:
+    """A perfect image reconstruction must not hide a wrong decomposition.
+
+    This catches removal of the target-proxy constraint: v6 could reconstruct
+    the image while putting several times too much energy into ``T_psf + R``.
+    """
+    from irstd_a.losses import APSFUnmixingLoss
+
+    image = torch.full((1, 1, 32, 32), 0.2)
+    mask = torch.zeros_like(image)
+    image[..., 15:18, 15:18] = 0.8
+    mask[..., 15:18, 15:18] = 1
+    targets = build_weak_targets(image, mask, dilation_radius=2, ring_radius=5)
+    weights = {name: 1.0 for name in LOSS_NAMES_V6}
+
+    calibrated = _controlled_prediction(image)
+    calibrated["T_psf_raw"] = targets["target_proxy"].clone()
+
+    missing = _controlled_prediction(image)
+    missing["T_psf_raw"] = torch.zeros_like(image)
+
+    _, calibrated_terms = APSFUnmixingLoss(weights)(image, mask, calibrated, targets)
+    _, missing_terms = APSFUnmixingLoss(weights)(image, mask, missing, targets)
+
+    assert calibrated_terms["rec"] < missing_terms["rec"]
+
+
 # ---------------------------------------------------------------------------
 # bg — outside-target smoothness (T3, T4)
 # ---------------------------------------------------------------------------
@@ -232,6 +259,28 @@ def test_ctr_bce_pulls_centres_to_one() -> None:
     _, terms = APSFUnmixingLoss(weights)(image, mask, prediction, targets)
     gradient = torch.autograd.grad(terms["ctr"], presence_logits)[0]
     assert gradient[targets["center"].bool()].mean() < 0
+
+
+def test_ctr_center_gradient_is_not_diluted_by_image_area() -> None:
+    """The same missed centroid must have the same learning signal at 32² and 64²."""
+    from irstd_a.losses import APSFUnmixingLoss
+
+    weights = {name: 1.0 for name in LOSS_NAMES_V6}
+    gradients = []
+    for size in (32, 64):
+        image = torch.full((1, 1, size, size), 0.2)
+        mask = torch.zeros_like(image)
+        image[..., size // 2, size // 2] = 0.9
+        mask[..., size // 2, size // 2] = 1
+        targets = build_weak_targets(image, mask, dilation_radius=2, ring_radius=5)
+        logits = torch.full_like(image, -6.0, requires_grad=True)
+        prediction = _controlled_prediction(image)
+        prediction["presence_logits"] = logits
+        _, terms = APSFUnmixingLoss(weights)(image, mask, prediction, targets)
+        gradient = torch.autograd.grad(terms["ctr"], logits)[0]
+        gradients.append(float(gradient[targets["center"].bool()].abs().mean()))
+
+    assert gradients[1] == pytest.approx(gradients[0], rel=0.05)
 
 
 def test_ctr_local_pulls_offcenter_maximum() -> None:
@@ -477,6 +526,38 @@ def test_flip_pulls_misaligned_presence() -> None:
     assert terms["flip"].item() > 1e-4
 
 
+def test_flip_penalty_is_not_diluted_by_image_area() -> None:
+    """A one-source displacement is equally wrong at 32² and 64²."""
+    from irstd_a.losses import APSFUnmixingLoss
+
+    weights = {name: 1.0 for name in LOSS_NAMES_V6}
+    penalties = []
+    for size in (32, 64):
+        image = torch.full((1, 1, size, size), 0.2)
+        mask = torch.zeros_like(image)
+        mask[..., size // 2, size // 2] = 1
+        targets = build_weak_targets(image, mask, dilation_radius=2, ring_radius=5)
+
+        prediction = _controlled_prediction(image)
+        logits = torch.full_like(image, -10.0)
+        logits[..., size // 2, size // 2] = 6.0
+        prediction["presence_logits"] = logits
+
+        flipped_prediction = _controlled_prediction(_flip_h(image))
+        wrong = _flip_h(logits)
+        expected_x = size - 1 - size // 2
+        wrong[..., size // 2, expected_x] = -10.0
+        wrong[..., size // 2, expected_x - 3] = 6.0
+        flipped_prediction["presence_logits"] = wrong
+
+        _, terms = APSFUnmixingLoss(weights)(
+            image, mask, prediction, targets, flipped_prediction=flipped_prediction
+        )
+        penalties.append(float(terms["flip"]))
+
+    assert penalties[1] == pytest.approx(penalties[0], rel=0.05)
+
+
 # ---------------------------------------------------------------------------
 # amp — physical amplitude alignment (T16, T17)
 # ---------------------------------------------------------------------------
@@ -535,6 +616,26 @@ def test_amp_penalises_binary_overshoot() -> None:
     _, matched_terms = APSFUnmixingLoss(weights)(image, mask, matched, targets)
     _, over_terms = APSFUnmixingLoss(weights)(image, mask, overshoot, targets)
     assert over_terms["amp"].item() > matched_terms["amp"].item()
+
+
+def test_amp_is_not_diluted_by_image_area() -> None:
+    """A fixed amplitude error at one centroid must be resolution invariant."""
+    from irstd_a.losses import APSFUnmixingLoss
+
+    weights = {name: 1.0 for name in LOSS_NAMES_V6}
+    losses = []
+    for size in (32, 64):
+        image = torch.full((1, 1, size, size), 0.2)
+        mask = torch.zeros_like(image)
+        image[..., size // 2, size // 2] = 0.9
+        mask[..., size // 2, size // 2] = 1
+        targets = build_weak_targets(image, mask, dilation_radius=2, ring_radius=5)
+        prediction = _controlled_prediction(image)
+        prediction["amplitude_logits"] = torch.full_like(image, 14.0)
+        _, terms = APSFUnmixingLoss(weights)(image, mask, prediction, targets)
+        losses.append(float(terms["amp"]))
+
+    assert losses[1] == pytest.approx(losses[0], rel=0.05)
 
 
 # ---------------------------------------------------------------------------

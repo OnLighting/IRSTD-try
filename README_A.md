@@ -23,14 +23,17 @@ The full design rationale lives in
 `docs/superpowers/specs/2026-09-07-a-v6-7loss-design.md`. Three structural
 differences from v5:
 
-1. **Eight-term loss with all weights 1.0.** v5's ten-term loss included
+1. **Eight-term loss with all top-level weights 1.0.** v5's ten-term loss included
    terms that duplicated each other (the v5 `target` + `residual` pair
    both reduced to "do not let target energy leak outside support") and
    terms whose effect was indistinguishable (`bg` mixed image-fidelity
    with TV). v6 collapses to eight physics-named addends: `rec`, `bg`,
-   `sp`, `ctr`, `psf`, `ind`, `flip`, `amp`. The only non-unit
-   coefficients are two engineering constants: `rec` upweights target
-   support by 5x, and `psf` uses a 0.1 usage-entropy coefficient.
+   `sp`, `ctr`, `psf`, `ind`, `flip`, `amp`. After the first formal v6 run,
+   `rec` again includes the target-proxy calibration needed to identify the
+   decomposition; sparse `ctr`, `amp`, and `flip` supervision is normalized
+   independently of image area. The internal non-unit coefficients are:
+   `rec` upweights target support by 5x, restores target calibration at
+   0.25, and `psf` uses a 0.1 usage-entropy coefficient.
 
 2. **Public `U` is single-construct.** v5 mixed 0.75·u_rec + 0.25·psf_entropy
    in the public output while only supervising u_rec with the loss. The
@@ -84,7 +87,8 @@ cross-domain result.
 | `train_a.py` | AMP training with paired h-flip forward. |
 | `eval_a.py` | Cross-dataset diagnostics, stability, and v6 gate reporting. |
 | `visualize_a.py` | Nine-panel component audits and PSF kernel sheet. |
-| `run_a_v6_remote.sh` | One-shot CUDA + tests + training + evaluation + visualization. |
+| `run_a_v6_1_remote.sh` | Corrected one-shot CUDA + tests + training + evaluation + strict gates + packaging. |
+| `run_a_v6_remote.sh` | Historical v6 runner retained for comparison. |
 
 ## Remote environment
 
@@ -152,7 +156,7 @@ artifact packaging without idle hand-offs:
 
 ```bash
 cd /path/to/new_model_v3
-bash run_a_v6_remote.sh
+bash run_a_v6_1_remote.sh
 ```
 
 Override `RUN_DIR`, `CONFIG`, `DEVICE`, or `SEED` as environment variables
@@ -162,7 +166,7 @@ only when intentionally creating a different experiment.
 cd /path/to/new_model_v3
 set -euo pipefail
 mkdir -p runs/a_psf
-RUN_DIR="runs/a_psf/irstd1k_seed42_v6_sevenloss"
+RUN_DIR="runs/a_psf/irstd1k_seed42_v6_1_corrected"
 
 python train_a.py \
   --config configs/a_psf_irstd1k.py \
@@ -175,24 +179,24 @@ If interrupted, resume without creating a new split:
 ```bash
 python train_a.py \
   --config configs/a_psf_irstd1k.py \
-  --run-dir runs/a_psf/irstd1k_seed42_v6_sevenloss \
-  --resume runs/a_psf/irstd1k_seed42_v6_sevenloss/a_last.pt \
-  --device cuda --seed 42 2>&1 | tee -a runs/a_psf/irstd1k_seed42_v6_sevenloss_console.log
+  --run-dir runs/a_psf/irstd1k_seed42_v6_1_corrected \
+  --resume runs/a_psf/irstd1k_seed42_v6_1_corrected/a_last.pt \
+  --device cuda --seed 42 2>&1 | tee -a runs/a_psf/irstd1k_seed42_v6_1_corrected_console.log
 ```
 
 ## Formal evaluation and visualization
 
 ```bash
 python eval_a.py \
-  --checkpoint runs/a_psf/irstd1k_seed42_v6_sevenloss/a_best.pt \
-  --run-dir runs/a_psf/irstd1k_seed42_v6_sevenloss \
+  --checkpoint runs/a_psf/irstd1k_seed42_v6_1_corrected/a_best.pt \
+  --run-dir runs/a_psf/irstd1k_seed42_v6_1_corrected \
   --datasets irstd1k sirst_uavb sirst4 \
   --probe-count 8 --device cuda
 
 python visualize_a.py \
-  --checkpoint runs/a_psf/irstd1k_seed42_v6_sevenloss/a_best.pt \
-  --metrics runs/a_psf/irstd1k_seed42_v6_sevenloss/per_image_metrics.csv \
-  --output-dir runs/a_psf/irstd1k_seed42_v6_sevenloss/visualizations \
+  --checkpoint runs/a_psf/irstd1k_seed42_v6_1_corrected/a_best.pt \
+  --metrics runs/a_psf/irstd1k_seed42_v6_1_corrected/per_image_metrics.csv \
+  --output-dir runs/a_psf/irstd1k_seed42_v6_1_corrected/visualizations \
   --max-panels 12 --device cuda
 ```
 

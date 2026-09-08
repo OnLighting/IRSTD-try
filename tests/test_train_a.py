@@ -29,6 +29,7 @@ def test_v6_config_has_seven_loss_terms_with_uniform_weights() -> None:
     weights (rec support_weight and psf usage_entropy_coef)."""
     config = load_config("configs/a_psf_irstd1k.py")
 
+    assert config["loss"]["objective_version"] == "v6.1"
     assert set(config["loss"]["weights"]) == set(LOSS_NAMES)
     for name in LOSS_NAMES:
         assert config["loss"]["weights"][name] == pytest.approx(1.0), name

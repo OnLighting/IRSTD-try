@@ -23,6 +23,9 @@ model = dict(
 )
 
 loss = dict(
+    # Bump whenever loss semantics change. Resume validation compares the
+    # complete config and rejects checkpoints trained under another objective.
+    objective_version="v6.1",
     weights=dict(
         rec=1.0,
         bg=1.0,

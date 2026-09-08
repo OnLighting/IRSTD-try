@@ -14,7 +14,7 @@ set -euo pipefail
 #   3. A second forward pass on the h-flipped image drives the `flip`
 #      equivariance loss term.
 
-RUN_DIR="${RUN_DIR:-runs/a_psf/irstd1k_seed42_v6_sevenloss}"
+RUN_DIR="${RUN_DIR:-runs/a_psf/irstd1k_seed42_v6_1_corrected}"
 CONFIG="${CONFIG:-configs/a_psf_irstd1k.py}"
 DEVICE="${DEVICE:-cuda}"
 SEED="${SEED:-42}"
@@ -66,7 +66,6 @@ python visualize_a.py \
 
 python - <<PY
 from pathlib import Path
-import json
 
 required = [
     "a_best.pt", "a_last.pt", "metrics.json", "stability.json",
@@ -76,40 +75,12 @@ root = Path("$RUN_DIR")
 missing = [name for name in required if not (root / name).is_file()]
 if missing:
     raise SystemExit(f"run finished but required artifacts are missing: {missing}")
-
-# v6 acceptance gate: check the new diagnostics on IRSTD-1K test.
-with (root / "metrics.json").open() as handle:
-    metrics = json.load(handle)
-irstd1k = metrics.get("datasets", {}).get("irstd1k", {})
-gates = {
-    "coverage_at_5px_gate": ("passed", True),
-    "uncertainty_error_spearman_median": (">= 0.30", None),
-}
-if "coverage_at_5px_gate" not in irstd1k:
-    print("[A-v6] WARNING: coverage_at_5px_gate missing from metrics.json")
-elif not irstd1k["coverage_at_5px_gate"]["passed"]:
-    print(f"[A-v6] coverage_at_5px gate FAILED: {irstd1k['coverage_at_5px_gate']}")
-
-spearman = irstd1k.get("uncertainty_error_spearman_median")
-if spearman is None or spearman < 0.30:
-    print(f"[A-v6] uncertainty/Spearman gate FAILED: median={spearman}, required >= 0.30")
-else:
-    print(f"[A-v6] uncertainty/Spearman median={spearman:.4f} (>= 0.30: PASS)")
-
-# h-flip S Pearson is in stability.json; the v5 gate is 0.90, v6 tightens
-# to 0.90 from 0.85.
-with (root / "stability.json").open() as handle:
-    stability = json.load(handle)
-hflip_S = stability.get("perturbation", {}).get("hflip", {}).get("S", {}).get("pearson", {}).get("median")
-if hflip_S is None:
-    print("[A-v6] WARNING: h-flip S Pearson missing from stability.json")
-elif hflip_S < 0.90:
-    print(f"[A-v6] h-flip S Pearson gate FAILED: median={hflip_S:.4f}, required >= 0.90")
-else:
-    print(f"[A-v6] h-flip S Pearson median={hflip_S:.4f} (>= 0.90: PASS)")
-
-print(f"[A-v6] complete: {root}")
 PY
+
+# Fail closed: a scientifically invalid run must stop here and must not be
+# announced or packaged as complete. Missing measurements are failures too.
+python -m irstd_a.acceptance --run-dir "$RUN_DIR"
+echo "[A-v6] complete: $RUN_DIR"
 
 # Keep the complete console stream with the scientific artifacts, then create
 # one archive outside RUN_DIR so it cannot recursively include itself.

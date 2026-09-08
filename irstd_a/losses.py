@@ -1,9 +1,10 @@
 """Losses that constrain the otherwise non-identifiable PSF decomposition.
 
-v6 design (2026-09-07): eight physics-named addends with weight 1.0 except
-for two engineering constants (rec support_weight=5.0 and psf usage
-entropy coefficient 0.1). The earlier v5 ten-term loss was reduced to
-this set after v5 in-domain results were clean but the public ``U`` was
+v6 design (2026-09-07): eight physics-named addends with weight 1.0. The
+corrected objective keeps the support weight (5.0), PSF usage-entropy
+coefficient (0.1), and target-calibration coefficient (0.25). The earlier
+v5 ten-term loss was reduced to this set after v5 in-domain results were
+clean but the public ``U`` was
 negative-Spearman against reconstruction error, ``S`` failed the
 horizontal-flip correlation gate, and five IRSTD-1K samples hit
 ``centroid_recall=0`` with ``presence_at_centroid=1.0`` because the
@@ -28,6 +29,26 @@ def _require_keys(container: Mapping, names: set[str], label: str) -> None:
     missing = names - set(container)
     if missing:
         raise KeyError(f"{label} missing required keys: {sorted(missing)}")
+
+
+def _masked_mean(value: Tensor, mask: Tensor, eps: float = 1e-6) -> Tensor:
+    """Average over supervised pixels, not over the surrounding image."""
+    return (value * mask).sum() / mask.sum().clamp_min(eps)
+
+
+def _relative_shape_l1(first: Tensor, second: Tensor, eps: float = 1e-6) -> Tensor:
+    """Symmetric relative L1 after removing each map's sigmoid floor.
+
+    Sparse source maps occupy only a handful of pixels. A plain image-wide
+    mean makes the same displacement four times weaker whenever resolution
+    doubles, which is precisely what happened to the v6 flip regularizer.
+    """
+    spatial_dims = (-1, -2, -3)
+    first_signal = first - first.amin(dim=(-1, -2), keepdim=True)
+    second_signal = second - second.amin(dim=(-1, -2), keepdim=True)
+    numerator = (first - second).abs().sum(dim=spatial_dims)
+    denominator = (first_signal.abs() + second_signal.abs()).sum(dim=spatial_dims)
+    return (numerator / denominator.clamp_min(eps)).mean()
 
 
 class APSFUnmixingLoss(nn.Module):
@@ -58,16 +79,46 @@ class APSFUnmixingLoss(nn.Module):
     # rec — area-weighted reconstruction (target support upweighted 5x)
     # ------------------------------------------------------------------
     @staticmethod
-    def _rec(image: Tensor, prediction: Mapping[str, Tensor], support: Tensor) -> Tensor:
+    def _rec(
+        image: Tensor,
+        prediction: Mapping[str, Tensor],
+        support: Tensor,
+        psf_support: Tensor,
+        target_proxy: Tensor,
+    ) -> Tensor:
         support_weight = 5.0
         recon = prediction["reconstruction_raw"]
         inside_err = (image - recon).abs() * support
         outside_err = (image - recon).abs() * (1.0 - support)
         pixel_count = float(image.shape[-1] * image.shape[-2])
-        return (
+        reconstruction_loss = (
             inside_err.sum(dim=(-1, -2, -3)) * support_weight
             + outside_err.sum(dim=(-1, -2, -3))
-        ).sum() / pixel_count
+        ).mean() / pixel_count
+
+        # Reconstruction alone cannot identify the decomposition: B can
+        # compensate for an arbitrarily over-bright or misplaced T_psf + R.
+        # Restore the v5 target-proxy calibration that the v6 simplification
+        # incorrectly classified as redundant.
+        spatial_dims = (-1, -2, -3)
+        target_output = prediction["T_psf_raw"] + prediction["R"]
+        proxy_energy = target_proxy.sum(dim=spatial_dims)
+        safe_proxy_energy = proxy_energy.clamp_min(1e-6)
+        target_fit = (
+            (target_output - target_proxy).abs() * support
+        ).sum(dim=spatial_dims) / safe_proxy_energy
+        target_energy = (target_output * support).sum(dim=spatial_dims)
+        target_energy_error = (target_energy - proxy_energy).abs() / safe_proxy_energy
+        target_leakage = torch.log1p(
+            (target_output.abs() * (1.0 - psf_support)).sum(dim=spatial_dims)
+            / safe_proxy_energy
+        )
+        present_loss = target_fit + target_energy_error + 2.0 * target_leakage
+        empty_loss = target_output.abs().mean(dim=spatial_dims)
+        decomposition_loss = torch.where(
+            proxy_energy > 1e-6, present_loss, empty_loss
+        ).mean()
+        return reconstruction_loss + 0.25 * decomposition_loss
 
     # ------------------------------------------------------------------
     # bg — outside-target smoothness (TV outside support only)
@@ -94,10 +145,12 @@ class APSFUnmixingLoss(nn.Module):
     # ------------------------------------------------------------------
     @staticmethod
     def _ctr_bce(presence_logits: Tensor, center: Tensor) -> Tensor:
-        return (
-            center * F.softplus(-presence_logits)
-            + (1.0 - center) * F.softplus(presence_logits)
-        ).mean()
+        # Balance rare centre pixels against the background. Image-wide BCE
+        # dilutes each positive by H*W and makes the all-background solution
+        # overwhelmingly attractive.
+        positive = _masked_mean(F.softplus(-presence_logits), center)
+        negative = _masked_mean(F.softplus(presence_logits), 1.0 - center)
+        return positive + negative
 
     @staticmethod
     def _ctr_local(presence_logits: Tensor, center: Tensor) -> Tensor:
@@ -119,7 +172,6 @@ class APSFUnmixingLoss(nn.Module):
     def _psf(params: Mapping[str, Tensor], psf_weights: Tensor, sigma_min: float, sigma_max: float) -> Tensor:
         sigma_x = params["sigma_x"]
         sigma_y = params["sigma_y"]
-        span = sigma_max - sigma_min
         # Boundary penalty: relu on both sides of the [sigma_min, sigma_max] band.
         boundary = (
             F.relu(sigma_min - sigma_x)
@@ -164,8 +216,8 @@ class APSFUnmixingLoss(nn.Module):
         A_orig = torch.sigmoid(prediction["amplitude_logits"])
         P_flip = torch.sigmoid(flipped_prediction["presence_logits"])
         A_flip = torch.sigmoid(flipped_prediction["amplitude_logits"])
-        p_diff = (P_flip - torch.flip(P_orig, dims=(-1,))).abs().mean()
-        a_diff = (A_flip - torch.flip(A_orig, dims=(-1,))).abs().mean()
+        p_diff = _relative_shape_l1(P_flip, torch.flip(P_orig, dims=(-1,)))
+        a_diff = _relative_shape_l1(A_flip, torch.flip(A_orig, dims=(-1,)))
         return p_diff + a_diff
 
     # ------------------------------------------------------------------
@@ -174,7 +226,7 @@ class APSFUnmixingLoss(nn.Module):
     @staticmethod
     def _amp(amplitude_logits: Tensor, source_proxy: Tensor, center: Tensor) -> Tensor:
         A = torch.sigmoid(amplitude_logits)
-        return (center * (A - source_proxy).abs()).mean()
+        return _masked_mean((A - source_proxy).abs(), center)
 
     # ------------------------------------------------------------------
     # forward
@@ -211,6 +263,7 @@ class APSFUnmixingLoss(nn.Module):
                 "center",
                 "support",
                 "psf_support",
+                "target_proxy",
                 "source_proxy",
             },
             "targets",
@@ -230,10 +283,12 @@ class APSFUnmixingLoss(nn.Module):
         _require_keys(params, {"sigma_x", "sigma_y"}, "psf_params")
 
         support = targets["support"]
+        psf_support = targets["psf_support"]
         center = targets["center"]
+        target_proxy = targets["target_proxy"]
         source_proxy = targets["source_proxy"]
 
-        rec = self._rec(image, prediction, support)
+        rec = self._rec(image, prediction, support, psf_support, target_proxy)
         bg = self._bg(background, support)
         sp = self._sp(source, center)
         ctr = self._ctr(presence_logits, center)

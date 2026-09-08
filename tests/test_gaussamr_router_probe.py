@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from PIL import Image
 
+from irstd_gaussamr.composer import SparseGaussianComposer
 from irstd_gaussamr.router_probe import (
     GaussianFeatureBank,
     GaussianRouter,
@@ -52,6 +53,19 @@ class ProposalDecodeTest(unittest.TestCase):
         self.assertEqual(proposals.shape, (1, 1, 6))
         torch.testing.assert_close(proposals[0, 0, 1:3], torch.tensor([30.0, 34.0]))
 
+    def test_small_images_still_return_the_fixed_budget(self):
+        maps = {
+            "objectness_logit": torch.zeros(1, 1, 4, 4),
+            "offset_xy": torch.zeros(1, 2, 4, 4),
+            "log_sigma_xy": torch.zeros(1, 2, 4, 4),
+            "uncertainty_logit": torch.zeros(1, 1, 4, 4),
+        }
+
+        proposals = decode_proposals(maps, k=24)
+
+        self.assertEqual(proposals.shape, (1, 24, 6))
+        torch.testing.assert_close(proposals[:, 16:, 0], torch.zeros(1, 8))
+
 
 class GaussianRouterTest(unittest.TestCase):
     def test_outputs_six_maps_at_one_eighth_resolution(self):
@@ -62,6 +76,22 @@ class GaussianRouterTest(unittest.TestCase):
         self.assertEqual(maps["log_sigma_xy"].shape, (2, 2, 9, 9))
         self.assertEqual(maps["uncertainty_logit"].shape, (2, 1, 9, 9))
         self.assertLessEqual(float(maps["offset_xy"].abs().max()), 0.5)
+
+
+class SparseGaussianComposerTest(unittest.TestCase):
+    def test_overlapping_proposals_have_finite_logits_and_gradients(self):
+        proposals = torch.tensor([[
+            [0.99, 10.0, 12.0, 1.0, 1.0, 0.5],
+            [0.80, 10.5, 12.0, 1.5, 1.0, 0.5],
+        ]], requires_grad=True)
+
+        logits = SparseGaussianComposer()(proposals, (24, 24))
+        logits.sum().backward()
+
+        self.assertEqual(logits.shape, (1, 1, 24, 24))
+        self.assertEqual(int(logits[0, 0].argmax()), 12 * 24 + 10)
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertTrue(torch.isfinite(proposals.grad).all())
 
 
 class TargetConstructionTest(unittest.TestCase):
@@ -100,12 +130,12 @@ class RouterLossTest(unittest.TestCase):
 
 class ProposalDiagnosticsTest(unittest.TestCase):
     def test_reports_budget_dependent_target_coverage(self):
-        proposals = torch.zeros(1, 16, 6)
-        proposals[0, :, 0] = torch.linspace(0.9, 0.1, 16)
+        proposals = torch.zeros(1, 24, 6)
+        proposals[0, :, 0] = torch.linspace(0.9, 0.1, 24)
         proposals[0, :, 1:3] = 100
         proposals[0, :, 3:5] = 1
         proposals[0, 0, 1:3] = torch.tensor([12.0, 12.0])
-        proposals[0, 8, 1:3] = torch.tensor([44.0, 44.0])
+        proposals[0, 23, 1:3] = torch.tensor([44.0, 44.0])
         instances = torch.tensor([
             [12.0, 12.0, 1.0, 1.0],
             [44.0, 44.0, 1.0, 1.0],
@@ -115,7 +145,8 @@ class ProposalDiagnosticsTest(unittest.TestCase):
 
         self.assertEqual(stats["targets"], 2)
         self.assertEqual(stats["hits_at_8"], 1)
-        self.assertEqual(stats["hits_at_16"], 2)
+        self.assertEqual(stats["hits_at_16"], 1)
+        self.assertEqual(stats["hits_at_24"], 2)
 
 
 class FixedSubsetTest(unittest.TestCase):
@@ -171,6 +202,7 @@ class RouterProbeCliTest(unittest.TestCase):
                     "--epochs", "1",
                     "--max-steps", "1",
                     "--device", "cpu",
+                    "--full-mask-loss",
                 ],
                 cwd=Path(__file__).parents[1],
                 text=True,
@@ -184,7 +216,9 @@ class RouterProbeCliTest(unittest.TestCase):
             self.assertEqual(metrics["config"]["val_size"], 1)
             self.assertEqual(metrics["config"]["lr"], 1e-3)
             self.assertEqual(metrics["config"]["lr_schedule"], "constant")
-            self.assertIn("coverage_at_16", metrics["best"])
+            self.assertEqual(metrics["config"]["k1"], 24)
+            self.assertIn("coverage_at_24", metrics["best"])
+            self.assertIn("gaussian_n_iou", metrics["best"])
             self.assertIn("router_probability_std", metrics["best"])
 
 

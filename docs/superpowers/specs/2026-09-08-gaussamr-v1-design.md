@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-08
 
-**Status:** proposed for implementation review
+**Status:** staged feasibility validation
 
 **Repository:** `new_model_v3`
 
@@ -25,6 +25,11 @@ introduced:
 
 V1 is a correctness and feasibility experiment. It is not intended to establish
 state of the art.
+
+The fixed-seed SIRST4 router probe calibrated the smallest viable first-stage
+budget to `K1 = 24`: the same checkpoint covered 44/47 targets at K=16 and
+46/47 at K=24. `K2 = 8` remains unchanged. This is a measured V1 correction,
+not an additional architecture feature.
 
 ## 2. Scope
 
@@ -159,7 +164,7 @@ uncertainty = sigmoid(uncertainty_logit)
 V1 uses diagonal covariance only. Correlation and rotation are excluded.
 
 Inference applies 3x3 local-max suppression to objectness and selects exactly
-`K1 = 16` cells per image with tensorized `topk`. Empty images still carry 16
+`K1 = 24` cells per image with tensorized `topk`. Empty images still carry 24
 slots; low-score slots remain valid tensor entries but are trained to produce
 negative final logits. No Python loop may select proposals.
 
@@ -175,7 +180,7 @@ This reserves detail computation for both likely and ambiguous candidates.
 
 ### 7.1 Context refinement
 
-- Capacity: `K1 = 16` proposals per image.
+- Capacity: `K1 = 24` proposals per image.
 - Source: the nine-channel Gaussian-bank tensor downsampled to 1/2 resolution.
 - Physical crop support: 64x64 input pixels centered at each `mu`.
 - Tensor crop shape: 32x32 through `grid_sample`.
@@ -300,7 +305,7 @@ forward(image, routing_mode="predicted", targets=None) -> {
     "logits":          (B,1,H,W),
     "gaussian_logits": (B,1,H,W),
     "router_maps":     dict[str, Tensor],
-    "proposals_l1":    (B,16,6),
+    "proposals_l1":    (B,24,6),
     "proposals_l2":    (B,8,6),
     "local_logits":    (B,8,1,48,48),
 }
@@ -328,7 +333,7 @@ Implementation is considered structurally correct only when all four gates pass.
 - All enabled losses and gradients are finite for positive, multi-target, and
   empty images.
 - The model overfits a deterministic 16-image subset to training nIoU >= 0.90.
-- On that subset, router coverage@16 reaches 1.00 and coverage@8 reaches at
+- On that subset, router coverage@24 reaches 1.00 and coverage@8 reaches at
   least 0.95.
 
 ### Gate C: short real-data probe
@@ -337,14 +342,14 @@ Run a fixed-seed train/validation probe using 64 IRSTD-1K training images and 32
 validation images. Stop at 10 epochs or 1,000 optimizer steps, whichever comes
 first. Record:
 
-- router coverage@16 and coverage@8;
+- router coverage@24 and coverage@8;
 - matched center error and sigma error;
 - Gaussian-only nIoU;
 - Gaussian-plus-residual nIoU;
 - full IoU/nIoU/Pd/Fa;
 - number of active positive and hard-negative proposals.
 
-The probe passes when coverage@16 >= 0.95, the residual output improves nIoU
+The probe passes when coverage@24 >= 0.95, the residual output improves nIoU
 over the Gaussian-only output, and no output/loss collapses to a constant or
 non-finite value. This gate tests correctness, not competitive accuracy.
 
@@ -381,7 +386,7 @@ the local refiner. No extra module may be added before these comparisons exist.
 
 ## 14. Diagnostic interpretation
 
-- Low coverage@16: router/target assignment failure; do not tune the detail
+- Low coverage@24: router/target assignment failure; do not tune the detail
   network.
 - High coverage but poor Gaussian-only nIoU: parameter decoding or target
   moment mismatch.

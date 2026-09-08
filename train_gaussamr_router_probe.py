@@ -16,6 +16,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from irstd_g0.data import SIRST4Dataset
+from irstd_g0.losses import BCEDiceLoss
+from irstd_g0.metrics import MetricAccumulator
+from irstd_gaussamr.composer import SparseGaussianComposer
 from irstd_gaussamr.router_probe import (
     GaussianFeatureBank,
     GaussianRouter,
@@ -52,6 +55,7 @@ def summarize(counters: dict[str, float], images: int, mean_loss: float) -> dict
         "loss": mean_loss,
         "coverage_at_8": counters["hits_at_8"] / targets if targets else 1.0,
         "coverage_at_16": counters["hits_at_16"] / targets if targets else 1.0,
+        "coverage_at_24": counters["hits_at_24"] / targets if targets else 1.0,
         "matched_center_error_px": counters["center_error_sum"] / matched if matched else None,
         "matched_sigma_log_error": counters["sigma_log_error_sum"] / matched if matched else None,
         "active_positive_per_image": counters["active_positive"] / images,
@@ -62,11 +66,12 @@ def summarize(counters: dict[str, float], images: int, mean_loss: float) -> dict
 
 
 @torch.no_grad()
-def evaluate(bank, router, loader, device) -> dict[str, float | int | None]:
+def evaluate(bank, router, loader, device, composer=None) -> dict[str, float | int | None]:
     router.eval()
+    mask_metrics = MetricAccumulator() if composer else None
     counters = {
         key: 0.0 for key in (
-            "targets", "hits_at_8", "hits_at_16", "matched",
+            "targets", "hits_at_8", "hits_at_16", "hits_at_24", "matched",
             "center_error_sum", "sigma_log_error_sum", "active_positive", "hard_negative",
             "probability_sum", "probability_square_sum", "router_cells",
         )
@@ -82,10 +87,23 @@ def evaluate(bank, router, loader, device) -> dict[str, float | int | None]:
         counters["router_cells"] += probability.numel()
         losses = router_loss(maps, instances)
         loss_sum += float(losses["total"].item())
-        stats = proposal_diagnostics(decode_proposals(maps, k=16), instances)
+        proposals = decode_proposals(maps, k=24)
+        stats = proposal_diagnostics(proposals, instances)
         for key, value in stats.items():
             counters[key] += value
-    return summarize(counters, len(loader.dataset), loss_sum / max(1, len(loader)))
+        if composer:
+            height, width = batch["mask"].shape[-2:]
+            mask_metrics.update_batch(torch.sigmoid(composer(proposals, (height, width))).cpu(), batch["mask"])
+    summary = summarize(counters, len(loader.dataset), loss_sum / max(1, len(loader)))
+    if mask_metrics:
+        gaussian = mask_metrics.summary()
+        summary.update(
+            gaussian_iou=gaussian["iou_mean"],
+            gaussian_n_iou=gaussian["n_iou_mean"],
+            gaussian_pd=gaussian["pd"],
+            gaussian_fa_per_image=gaussian["fa_per_image"],
+        )
+    return summary
 
 
 def main() -> None:
@@ -98,6 +116,8 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--init-checkpoint")
+    parser.add_argument("--full-mask-loss", action="store_true")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
     if min(args.train_size, args.val_size, args.epochs, args.max_steps) <= 0:
@@ -120,6 +140,11 @@ def main() -> None:
 
     bank = GaussianFeatureBank().to(args.device).eval()
     router = GaussianRouter().to(args.device)
+    if args.init_checkpoint:
+        checkpoint = torch.load(args.init_checkpoint, map_location=args.device, weights_only=False)
+        router.load_state_dict(checkpoint["router"])
+    composer = SparseGaussianComposer().to(args.device) if args.full_mask_loss else None
+    mask_loss_fn = BCEDiceLoss().to(args.device) if args.full_mask_loss else None
     optimizer = torch.optim.AdamW(router.parameters(), lr=args.lr, weight_decay=0.05)
 
     config = {
@@ -134,10 +159,12 @@ def main() -> None:
         "lr": args.lr,
         "lr_schedule": "constant",
         "weight_decay": 0.05,
-        "k1": 16,
+        "k1": 24,
         "k2_diagnostic": 8,
         "match_radius_px": 12,
         "augmentation": "g0_hflip_vflip_rot90",
+        "init_checkpoint": args.init_checkpoint,
+        "full_mask_loss": args.full_mask_loss,
     }
     history = []
     best = None
@@ -154,31 +181,37 @@ def main() -> None:
                 features = bank(image)
             maps = router(features)
             losses = router_loss(maps, instances)
-            if not torch.isfinite(losses["total"]):
+            total_loss = losses["total"]
+            if composer:
+                gaussian_logits = composer(decode_proposals(maps, k=24), mask.shape[-2:])
+                total_loss = total_loss + mask_loss_fn(gaussian_logits, mask.to(args.device))
+            if not torch.isfinite(total_loss):
                 raise FloatingPointError(f"non-finite router loss at step {step}")
             optimizer.zero_grad(set_to_none=True)
-            losses["total"].backward()
+            total_loss.backward()
             torch.nn.utils.clip_grad_norm_(router.parameters(), 1.0)
             optimizer.step()
-            train_loss += float(losses["total"].item())
+            train_loss += float(total_loss.item())
             batches += 1
             step += 1
             if step >= args.max_steps:
                 break
 
-        metrics = evaluate(bank, router, val_loader, args.device)
+        metrics = evaluate(bank, router, val_loader, args.device, composer)
         metrics.update(epoch=epoch, step=step, train_loss=train_loss / max(1, batches))
         history.append(metrics)
         print(json.dumps(metrics, ensure_ascii=False), flush=True)
-        if best is None or (metrics["coverage_at_16"], metrics["coverage_at_8"]) > (best["coverage_at_16"], best["coverage_at_8"]):
+        score = (metrics["gaussian_n_iou"], metrics["coverage_at_24"]) if composer else (metrics["coverage_at_24"], metrics["coverage_at_8"])
+        best_score = None if best is None else ((best["gaussian_n_iou"], best["coverage_at_24"]) if composer else (best["coverage_at_24"], best["coverage_at_8"]))
+        if best is None or score > best_score:
             best = dict(metrics)
             torch.save({"router": router.state_dict(), "config": config, "best": best}, run_dir / "router_best.pt")
         output = {
             "config": config,
-            "gate": {"coverage_at_16_min": 0.95, "router_probability_std_min": 1e-4},
+            "gate": {"coverage_at_24_min": 0.95, "router_probability_std_min": 1e-4},
             "best": best,
             "passes_router_gate": bool(
-                best["coverage_at_16"] >= 0.95
+                best["coverage_at_24"] >= 0.95
                 and best["router_probability_std"] >= 1e-4
                 and math.isfinite(best["loss"])
             ),

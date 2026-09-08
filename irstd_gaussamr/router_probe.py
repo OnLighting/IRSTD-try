@@ -188,8 +188,6 @@ def proposal_diagnostics(
     active = proposals[:, 0] >= active_threshold
     stats: dict[str, float | int] = {
         "targets": len(instances),
-        "hits_at_8": 0,
-        "hits_at_16": 0,
         "matched": 0,
         "center_error_sum": 0.0,
         "sigma_log_error_sum": 0.0,
@@ -200,23 +198,23 @@ def proposal_diagnostics(
         stats["hard_negative"] = int(active.sum().item())
         return stats
 
-    for k in (8, 16):
+    for k in sorted({min(8, len(proposals)), min(16, len(proposals)), len(proposals)}):
         distance = torch.cdist(instances[:, :2], proposals[:k, 1:3])
         stats[f"hits_at_{k}"] = int((distance.min(dim=1).values <= match_radius).sum().item())
 
-    distance = torch.cdist(instances[:, :2], proposals[:16, 1:3])
+    distance = torch.cdist(instances[:, :2], proposals[:, 1:3])
     nearest_distance, nearest_index = distance.min(dim=1)
     matched = nearest_distance <= match_radius
     stats["matched"] = int(matched.sum().item())
     stats["center_error_sum"] = float(nearest_distance[matched].sum().item())
     if matched.any():
-        predicted_sigma = proposals[:16, 3:5][nearest_index[matched]].clamp_min(1e-6)
+        predicted_sigma = proposals[:, 3:5][nearest_index[matched]].clamp_min(1e-6)
         target_sigma = instances[matched, 2:].clamp_min(1e-6)
         stats["sigma_log_error_sum"] = float((predicted_sigma.log() - target_sigma.log()).abs().mean(dim=1).sum().item())
 
     proposal_is_positive = distance.min(dim=0).values <= match_radius
-    stats["active_positive"] = int((active[:16] & proposal_is_positive).sum().item())
-    stats["hard_negative"] = int((active[:16] & ~proposal_is_positive).sum().item())
+    stats["active_positive"] = int((active & proposal_is_positive).sum().item())
+    stats["hard_negative"] = int((active & ~proposal_is_positive).sum().item())
     return stats
 
 
@@ -224,11 +222,10 @@ def decode_proposals(maps: dict[str, torch.Tensor], k: int = 16, stride: int = 8
     """Decode exactly k locally maximal router cells as [score,x,y,sx,sy,u]."""
     logits = maps["objectness_logit"]
     batch, _, height, width = logits.shape
-    if k > height * width:
-        raise ValueError(f"k={k} exceeds the {height * width} router cells")
+    selected = min(k, height * width)
     local_max = F.max_pool2d(logits, 3, stride=1, padding=1)
     suppressed = torch.where(logits >= local_max, logits, torch.full_like(logits, -1e9))
-    values, indices = suppressed.flatten(1).topk(k, dim=1)
+    values, indices = suppressed.flatten(1).topk(selected, dim=1)
 
     def gather(name: str) -> torch.Tensor:
         tensor = maps[name].flatten(2)
@@ -241,4 +238,7 @@ def decode_proposals(maps: dict[str, torch.Tensor], k: int = 16, stride: int = 8
     grid_y = torch.div(indices, width, rounding_mode="floor").to(logits.dtype)
     mu_x = stride * (grid_x + 0.5 + offset[..., 0])
     mu_y = stride * (grid_y + 0.5 + offset[..., 1])
-    return torch.stack((torch.sigmoid(values), mu_x, mu_y, sigma[..., 0], sigma[..., 1], uncertainty), dim=-1)
+    proposals = torch.stack((torch.sigmoid(values), mu_x, mu_y, sigma[..., 0], sigma[..., 1], uncertainty), dim=-1)
+    if selected < k:
+        proposals = torch.cat((proposals, proposals.new_zeros(batch, k - selected, 6)), dim=1)
+    return proposals

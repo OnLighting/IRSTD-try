@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-08
 
-**Status:** staged feasibility validation
+**Status:** core sparse-detail hypothesis validated; end-to-end and efficiency gates pending
 
 **Repository:** `new_model_v3`
 
@@ -26,10 +26,48 @@ introduced:
 V1 is a correctness and feasibility experiment. It is not intended to establish
 state of the art.
 
-The fixed-seed SIRST4 router probe calibrated the smallest viable first-stage
-budget to `K1 = 24`: the same checkpoint covered 44/47 targets at K=16 and
-46/47 at K=24. `K2 = 8` remains unchanged. This is a measured V1 correction,
-not an additional architecture feature.
+### 1.1 Current fixed-seed validation status
+
+All measurements below use SIRST4 only, seed 42, 64 training images, 32
+validation images, batch size 1, and at most 10 epochs / 1,000 steps.
+
+| Stage | Result | Decision |
+|---|---|---|
+| Router budget | K=16 covered 44/47 targets; K=24 covered 46/47 on the router checkpoint | Set `K1 = 24`; keep `K2 = 8` |
+| Gaussian-only fine-tune | coverage@24 45/47 (0.957), IoU 0.214, nIoU 0.607, Pd 0.563, Fa 1.625 | Router gate passes; analytic mask alone is insufficient |
+| Parameter oracle diagnostic | replacing center, sigma, and both produced nIoU 0.707, 0.687, and 0.905 | Predicted Gaussian parameters, not the moment target definition, limit Gaussian-only output |
+| ContextRefiner, balanced BCE | best nIoU 0.593; center error 2.36 to 2.11 px; sigma error 0.509 to 0.514; Fa 1.625 to 2.688; train/validation nIoU 0.689/0.593 | Reject Context-only correction on this probe; do not add epochs |
+| Detail residual, Context bypassed | best at epoch 10: IoU 0.324, nIoU 0.662, Pd 0.844, Fa 1.875; K2 coverage 38/47 (0.809) | Gate-C residual-improvement condition passes |
+
+The current evidence validates the narrow core claim: a fixed-budget
+full-resolution residual on eight routed 48x48 regions improves the analytic
+Gaussian result while processing exactly `8 * 48 * 48 = 18,432` heavy-path
+spatial sites per image. It does not yet establish an end-to-end speedup or
+validate ContextRefiner.
+
+### 1.2 Immediate next work
+
+The next step is to package the passing path into one inference model:
+`GaussianFeatureBank -> GaussianRouter -> K1=24 Gaussian base -> K2=8
+DetailRefiner residual -> full-resolution logits`. ContextRefiner remains
+bypassed. The model must expose the forward contract in Section 11, accept only
+`I` in predicted inference, pad/crop arbitrary image sizes, and load the passing
+router/detail checkpoints.
+
+After that wrapper exists, run only the remaining gates in this order:
+
+1. Finish Gate A with border crop/paste, arbitrary-size output, and finite
+   gradient tests on the packaged model.
+2. Run Gate B's deterministic 16-image overfit check; record full-mask nIoU and
+   K1/K2 coverage without changing architecture.
+3. Run Gate D at 512x512, batch 1: total parameters, end-to-end FLOPs, CUDA
+   median/p95 latency, and peak allocated memory for both G0 and the packaged
+   sparse model.
+4. Only if Gate D shows a real end-to-end advantage, run the five ablations in
+   Section 13 on the same fixed SIRST4 split.
+
+Do not add another dataset, extend the epoch budget, or redesign ContextRefiner
+before these checks are complete.
 
 ## 2. Scope
 

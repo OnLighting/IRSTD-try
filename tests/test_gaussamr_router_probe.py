@@ -10,6 +10,14 @@ import torch
 from PIL import Image
 
 from irstd_gaussamr.composer import SparseGaussianComposer
+from irstd_gaussamr.refiners import (
+    ContextRefiner,
+    DetailRefiner,
+    context_refiner_loss,
+    detail_crops,
+    gaussian_patch_logits,
+    select_detail_proposals,
+)
 from irstd_gaussamr.router_probe import (
     GaussianFeatureBank,
     GaussianRouter,
@@ -92,6 +100,89 @@ class SparseGaussianComposerTest(unittest.TestCase):
         self.assertEqual(int(logits[0, 0].argmax()), 12 * 24 + 10)
         self.assertTrue(torch.isfinite(logits).all())
         self.assertTrue(torch.isfinite(proposals.grad).all())
+
+    def test_zero_residual_is_identity_and_nonzero_residual_has_gradient(self):
+        proposals = torch.tensor([[[0.9, 12.0, 12.0, 1.5, 1.5, 0.5]]])
+        residual = torch.zeros(1, 1, 1, 48, 48, requires_grad=True)
+        composer = SparseGaussianComposer()
+
+        baseline = composer(proposals, (24, 24))
+        refined = composer(proposals, (24, 24), residual)
+        refined.sum().backward()
+
+        torch.testing.assert_close(refined, baseline)
+        self.assertTrue(torch.isfinite(residual.grad).all())
+
+
+class ContextRefinerTest(unittest.TestCase):
+    def test_zero_initialized_refiner_preserves_fixed_budget_proposals(self):
+        features = torch.randn(1, 9, 64, 80)
+        proposals = torch.tensor([[[0.75, 30.0, 24.0, 1.5, 2.0, 0.4]]]).repeat(1, 24, 1)
+
+        refined = ContextRefiner()(features, proposals)
+
+        self.assertEqual(refined.shape, (1, 24, 6))
+        torch.testing.assert_close(refined, proposals, atol=1e-6, rtol=1e-6)
+
+    def test_context_loss_is_finite_and_updates_refiner(self):
+        refiner = ContextRefiner()
+        features = torch.randn(1, 9, 64, 64)
+        proposals = torch.tensor([[[0.6, 20.0, 20.0, 1.0, 1.0, 0.5]]]).repeat(1, 24, 1)
+        instances = torch.tensor([[21.0, 19.0, 1.5, 1.2]])
+
+        refined = refiner(features, proposals)
+        losses = context_refiner_loss(refined, instances)
+        losses["total"].backward()
+
+        self.assertTrue(all(torch.isfinite(value) for value in losses.values()))
+        self.assertTrue(any(parameter.grad is not None for parameter in refiner.parameters()))
+
+    def test_context_classification_balances_one_positive_against_negatives(self):
+        proposals = torch.tensor([[[0.5, 20.0, 20.0, 1.0, 1.0, 0.5]]]).repeat(1, 24, 1)
+        proposals.requires_grad_()
+        instances = torch.tensor([[20.0, 20.0, 1.0, 1.0]])
+
+        losses = context_refiner_loss(proposals, instances)
+        losses["classification"].backward()
+
+        self.assertAlmostEqual(float(proposals.grad[..., 0].sum()), 0.0, places=5)
+
+
+class DetailRefinerTest(unittest.TestCase):
+    def test_selects_fixed_k2_by_probability_uncertainty_priority(self):
+        proposals = torch.zeros(1, 24, 6)
+        proposals[..., 0] = torch.linspace(0.9, 0.1, 24)
+        proposals[..., 5] = 0.0
+        proposals[0, 10, 0] = 0.65
+        proposals[0, 10, 5] = 1.0
+
+        selected, indices = select_detail_proposals(proposals, k=8)
+
+        self.assertEqual(selected.shape, (1, 8, 6))
+        self.assertEqual(indices.shape, (1, 8))
+        self.assertIn(10, indices[0].tolist())
+
+    def test_zero_initialized_detail_residual_preserves_gaussian_patch(self):
+        features = torch.randn(1, 9, 64, 80)
+        proposals = torch.tensor([[[0.8, 30.0, 24.0, 1.5, 2.0, 0.5]]]).repeat(1, 8, 1)
+        refiner = DetailRefiner()
+
+        residual = refiner(features, proposals)
+        local_logits = gaussian_patch_logits(proposals) + residual
+
+        self.assertEqual(residual.shape, (1, 8, 1, 48, 48))
+        torch.testing.assert_close(residual, torch.zeros_like(residual))
+        torch.testing.assert_close(local_logits, gaussian_patch_logits(proposals))
+
+    def test_detail_crop_keeps_integer_center_aligned(self):
+        image = torch.zeros(1, 1, 64, 64)
+        image[0, 0, 20, 30] = 1
+        proposals = torch.tensor([[[0.9, 30.0, 20.0, 1.0, 1.0, 0.5]]])
+
+        crop = detail_crops(image, proposals)
+
+        self.assertEqual(crop.shape, (1, 1, 1, 48, 48))
+        self.assertEqual(int(crop[0, 0, 0].argmax()), 24 * 48 + 24)
 
 
 class TargetConstructionTest(unittest.TestCase):
@@ -220,6 +311,62 @@ class RouterProbeCliTest(unittest.TestCase):
             self.assertIn("coverage_at_24", metrics["best"])
             self.assertIn("gaussian_n_iou", metrics["best"])
             self.assertIn("router_probability_std", metrics["best"])
+
+            context_run_dir = Path(tmp) / "context_run"
+            context_result = subprocess.run(
+                [
+                    sys.executable,
+                    "train_gaussamr_router_probe.py",
+                    "--data-root", str(root),
+                    "--run-dir", str(context_run_dir),
+                    "--train-size", "1",
+                    "--val-size", "1",
+                    "--epochs", "1",
+                    "--max-steps", "1",
+                    "--device", "cpu",
+                    "--full-mask-loss",
+                    "--context-refiner",
+                    "--init-checkpoint", str(run_dir / "router_best.pt"),
+                ],
+                cwd=Path(__file__).parents[1],
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(context_result.returncode, 0, context_result.stdout + context_result.stderr)
+            context_metrics = json.loads((context_run_dir / "metrics.json").read_text(encoding="utf-8"))
+            self.assertTrue(context_metrics["config"]["context_refiner"])
+            self.assertIn("context_matched_center_error_px", context_metrics["best"])
+            context_checkpoint = torch.load(context_run_dir / "context_best.pt", map_location="cpu")
+            self.assertIn("context_refiner", context_checkpoint)
+
+            detail_run_dir = Path(tmp) / "detail_run"
+            detail_result = subprocess.run(
+                [
+                    sys.executable,
+                    "train_gaussamr_router_probe.py",
+                    "--data-root", str(root),
+                    "--run-dir", str(detail_run_dir),
+                    "--train-size", "1",
+                    "--val-size", "1",
+                    "--epochs", "1",
+                    "--max-steps", "1",
+                    "--device", "cpu",
+                    "--full-mask-loss",
+                    "--detail-refiner",
+                    "--init-checkpoint", str(run_dir / "router_best.pt"),
+                ],
+                cwd=Path(__file__).parents[1],
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(detail_result.returncode, 0, detail_result.stdout + detail_result.stderr)
+            detail_metrics = json.loads((detail_run_dir / "metrics.json").read_text(encoding="utf-8"))
+            self.assertIn("detail_n_iou", detail_metrics["best"])
+            self.assertIn("passes_detail_gate", detail_metrics)
+            detail_checkpoint = torch.load(detail_run_dir / "detail_best.pt", map_location="cpu")
+            self.assertIn("detail_refiner", detail_checkpoint)
 
 
 if __name__ == "__main__":

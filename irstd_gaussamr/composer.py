@@ -14,12 +14,21 @@ class SparseGaussianComposer(nn.Module):
         self.crop_size = crop_size
         self.background_logit = background_logit
 
-    def forward(self, proposals: torch.Tensor, output_size: tuple[int, int]) -> torch.Tensor:
+    def forward(
+        self,
+        proposals: torch.Tensor,
+        output_size: tuple[int, int],
+        residual_logits: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         height, width = output_size
+        if residual_logits is not None and residual_logits.shape != (
+            proposals.shape[0], proposals.shape[1], 1, self.crop_size, self.crop_size
+        ):
+            raise ValueError("residual_logits must have shape (B,K,1,48,48)")
         local = torch.arange(self.crop_size, device=proposals.device)
         local_y, local_x = torch.meshgrid(local, local, indexing="ij")
         outputs = []
-        for image_proposals in proposals:
+        for image_index, image_proposals in enumerate(proposals):
             mu = image_proposals[:, 1:3]
             sigma = image_proposals[:, 3:5].clamp(0.5, 8.0)
             origin = torch.floor(mu - self.crop_size / 2).long()
@@ -34,6 +43,8 @@ class SparseGaussianComposer(nn.Module):
                 objectness_logit - 0.5 * mahalanobis_sq,
                 torch.full_like(mahalanobis_sq, self.background_logit),
             )
+            if residual_logits is not None:
+                patch = patch + residual_logits[image_index, :, 0]
             valid = (x >= 0) & (x < width) & (y >= 0) & (y < height)
             flat_index = (y * width + x).flatten()
             canvas = proposals.new_full((height * width,), math.exp(self.background_logit))

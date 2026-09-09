@@ -310,7 +310,9 @@ def main() -> None:
                 selected, indices = select_detail_proposals(proposals, k=8)
                 residual = detail_refiner(features, selected)
                 target_crops = detail_crops(mask.to(args.device), selected)
-                local_logits = gaussian_patch_logits(selected) + residual
+                local_logits = gaussian_patch_logits(
+                    selected, residual_logits=residual
+                )
                 local_loss = mask_loss_fn(
                     local_logits.flatten(0, 1), target_crops.flatten(0, 1)
                 )

@@ -38,13 +38,14 @@ class SparseGaussianComposer(nn.Module):
             dy = (y - mu[:, 1, None, None]) / sigma[:, 1, None, None]
             mahalanobis_sq = dx.square() + dy.square()
             objectness_logit = torch.logit(image_proposals[:, 0].clamp(1e-6, 1 - 1e-6))[:, None, None]
+            inside = objectness_logit - 0.5 * mahalanobis_sq
+            if residual_logits is not None:
+                inside = inside + residual_logits[image_index, :, 0]
             patch = torch.where(
                 mahalanobis_sq <= 9,
-                objectness_logit - 0.5 * mahalanobis_sq,
+                inside,
                 torch.full_like(mahalanobis_sq, self.background_logit),
             )
-            if residual_logits is not None:
-                patch = patch + residual_logits[image_index, :, 0]
             valid = (x >= 0) & (x < width) & (y >= 0) & (y < height)
             flat_index = (y * width + x).flatten()
             canvas = proposals.new_full((height * width,), math.exp(self.background_logit))

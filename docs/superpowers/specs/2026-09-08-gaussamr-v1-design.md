@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-08
 
-**Status:** core sparse-detail hypothesis validated; end-to-end and efficiency gates pending
+**Status:** packaged predicted-inference path and Gate A complete; Gate B and Gate D pending
 
 **Repository:** `new_model_v3`
 
@@ -37,7 +37,7 @@ validation images, batch size 1, and at most 10 epochs / 1,000 steps.
 | Gaussian-only fine-tune | coverage@24 45/47 (0.957), IoU 0.214, nIoU 0.607, Pd 0.563, Fa 1.625 | Router gate passes; analytic mask alone is insufficient |
 | Parameter oracle diagnostic | replacing center, sigma, and both produced nIoU 0.707, 0.687, and 0.905 | Predicted Gaussian parameters, not the moment target definition, limit Gaussian-only output |
 | ContextRefiner, balanced BCE | best nIoU 0.593; center error 2.36 to 2.11 px; sigma error 0.509 to 0.514; Fa 1.625 to 2.688; train/validation nIoU 0.689/0.593 | Reject Context-only correction on this probe; do not add epochs |
-| Detail residual, Context bypassed | best at epoch 10: IoU 0.324, nIoU 0.662, Pd 0.844, Fa 1.875; K2 coverage 38/47 (0.809) | Gate-C residual-improvement condition passes |
+| Detail residual, Context bypassed | strict radius-3 recomposition: IoU 0.308, nIoU 0.654, Pd 0.844, Fa 1.719; K2 coverage 38/47 (0.809) | Gate-C residual-improvement condition still passes |
 
 The current evidence validates the narrow core claim: a fixed-budget
 full-resolution residual on eight routed 48x48 regions improves the analytic
@@ -45,25 +45,32 @@ Gaussian result while processing exactly `8 * 48 * 48 = 18,432` heavy-path
 spatial sites per image. It does not yet establish an end-to-end speedup or
 validate ContextRefiner.
 
-### 1.2 Immediate next work
+### 1.2 Packaged inference and immediate next work
 
-The next step is to package the passing path into one inference model:
+The passing path is now packaged in `irstd_gaussamr.model.GaussAMRV1`:
 `GaussianFeatureBank -> GaussianRouter -> K1=24 Gaussian base -> K2=8
 DetailRefiner residual -> full-resolution logits`. ContextRefiner remains
-bypassed. The model must expose the forward contract in Section 11, accept only
-`I` in predicted inference, pad/crop arbitrary image sizes, and load the passing
-router/detail checkpoints.
+bypassed. The model exposes the forward contract in Section 11, accepts only
+`I` in predicted inference, pads/crops arbitrary image sizes, and loads the
+passing router/detail checkpoint. Gate A passes for arbitrary output sizes,
+four-border crop/paste alignment, overlapping proposals, and finite end-to-end
+gradients.
 
-After that wrapper exists, run only the remaining gates in this order:
+During packaging, a composition-order defect was corrected: residual logits are
+now added only inside Mahalanobis radius 3, so they cannot override the `-12`
+background outside a proposal's defined support. Re-evaluating the passing
+checkpoint on the same fixed 32-image validation subset changed detail nIoU
+from 0.662 to 0.654 and Fa from 1.875 to 1.719; the residual-improvement gate
+still passes over the unchanged Gaussian-only nIoU of 0.607.
 
-1. Finish Gate A with border crop/paste, arbitrary-size output, and finite
-   gradient tests on the packaged model.
-2. Run Gate B's deterministic 16-image overfit check; record full-mask nIoU and
+Run only the remaining gates in this order:
+
+1. Run Gate B's deterministic 16-image overfit check; record full-mask nIoU and
    K1/K2 coverage without changing architecture.
-3. Run Gate D at 512x512, batch 1: total parameters, end-to-end FLOPs, CUDA
+2. Run Gate D at 512x512, batch 1: total parameters, end-to-end FLOPs, CUDA
    median/p95 latency, and peak allocated memory for both G0 and the packaged
    sparse model.
-4. Only if Gate D shows a real end-to-end advantage, run the five ablations in
+3. Only if Gate D shows a real end-to-end advantage, run the five ablations in
    Section 13 on the same fixed SIRST4 split.
 
 Do not add another dataset, extend the epoch budget, or redesign ContextRefiner

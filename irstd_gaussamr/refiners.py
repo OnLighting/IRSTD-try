@@ -183,6 +183,7 @@ def gaussian_patch_logits(
     proposals: torch.Tensor,
     crop_size: int = 48,
     background_logit: float = -12.0,
+    residual_logits: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Return local Gaussian logits in the same coordinate frame as detail crops."""
     local = torch.arange(crop_size, device=proposals.device, dtype=proposals.dtype)
@@ -195,9 +196,12 @@ def gaussian_patch_logits(
     dy = (y - proposals[..., 2, None, None]) / sigma[..., 1, None, None]
     distance = dx.square() + dy.square()
     objectness = torch.logit(proposals[..., 0].clamp(1e-6, 1 - 1e-6))[..., None, None]
+    inside = objectness - 0.5 * distance
+    if residual_logits is not None:
+        inside = inside + residual_logits[:, :, 0]
     logits = torch.where(
         distance <= 9,
-        objectness - 0.5 * distance,
+        inside,
         torch.full_like(distance, background_logit),
     )
     return logits[:, :, None]

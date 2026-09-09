@@ -113,6 +113,18 @@ class SparseGaussianComposerTest(unittest.TestCase):
         torch.testing.assert_close(refined, baseline)
         self.assertTrue(torch.isfinite(residual.grad).all())
 
+    def test_residual_cannot_create_logits_outside_gaussian_support(self):
+        proposals = torch.tensor([[[0.99, 24.0, 24.0, 1.0, 1.0, 0.5]]])
+        residual = torch.zeros(1, 1, 1, 48, 48)
+        residual[0, 0, 0, 0, 0] = 30
+        composer = SparseGaussianComposer()
+
+        baseline = composer(proposals, (48, 48))
+        refined = composer(proposals, (48, 48), residual)
+
+        torch.testing.assert_close(refined[0, 0, 0, 0], baseline[0, 0, 0, 0])
+        self.assertEqual(int(refined[0, 0].argmax()), 24 * 48 + 24)
+
 
 class ContextRefinerTest(unittest.TestCase):
     def test_zero_initialized_refiner_preserves_fixed_budget_proposals(self):
@@ -183,6 +195,16 @@ class DetailRefinerTest(unittest.TestCase):
 
         self.assertEqual(crop.shape, (1, 1, 1, 48, 48))
         self.assertEqual(int(crop[0, 0, 0].argmax()), 24 * 48 + 24)
+
+    def test_local_residual_is_truncated_outside_gaussian_support(self):
+        proposals = torch.tensor([[[0.99, 24.0, 24.0, 1.0, 1.0, 0.5]]])
+        residual = torch.zeros(1, 1, 1, 48, 48)
+        residual[0, 0, 0, 0, 0] = 30
+
+        logits = gaussian_patch_logits(proposals, residual_logits=residual)
+
+        self.assertEqual(float(logits[0, 0, 0, 0, 0]), -12.0)
+        self.assertEqual(int(logits[0, 0, 0].argmax()), 24 * 48 + 24)
 
 
 class TargetConstructionTest(unittest.TestCase):
@@ -337,7 +359,9 @@ class RouterProbeCliTest(unittest.TestCase):
             context_metrics = json.loads((context_run_dir / "metrics.json").read_text(encoding="utf-8"))
             self.assertTrue(context_metrics["config"]["context_refiner"])
             self.assertIn("context_matched_center_error_px", context_metrics["best"])
-            context_checkpoint = torch.load(context_run_dir / "context_best.pt", map_location="cpu")
+            context_checkpoint = torch.load(
+                context_run_dir / "context_best.pt", map_location="cpu", weights_only=False
+            )
             self.assertIn("context_refiner", context_checkpoint)
 
             detail_run_dir = Path(tmp) / "detail_run"
@@ -365,7 +389,9 @@ class RouterProbeCliTest(unittest.TestCase):
             detail_metrics = json.loads((detail_run_dir / "metrics.json").read_text(encoding="utf-8"))
             self.assertIn("detail_n_iou", detail_metrics["best"])
             self.assertIn("passes_detail_gate", detail_metrics)
-            detail_checkpoint = torch.load(detail_run_dir / "detail_best.pt", map_location="cpu")
+            detail_checkpoint = torch.load(
+                detail_run_dir / "detail_best.pt", map_location="cpu", weights_only=False
+            )
             self.assertIn("detail_refiner", detail_checkpoint)
 
 

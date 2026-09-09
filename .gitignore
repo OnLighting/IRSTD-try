@@ -6,7 +6,7 @@ __pycache__/
 .mypy_cache/
 .ipynb_checkpoints/
 .worktrees/
-
+.superpowers/
 # 虚拟环境
 venv/
 .venv/
@@ -41,3 +41,8 @@ Thumbs.db
 .claude/
 /docs/
 debug/
+
+
+runs/
+tests/
+docs/

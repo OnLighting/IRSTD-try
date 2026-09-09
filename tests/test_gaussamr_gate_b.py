@@ -1,7 +1,10 @@
-import json
+﻿import json
+import os
 import random
+import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,6 +32,17 @@ from irstd_gaussamr.gate_b import (
 from irstd_gaussamr.model import GaussAMRV1
 from irstd_gaussamr.refiners import DetailRefiner
 from irstd_gaussamr.router_probe import GaussianFeatureBank, GaussianRouter
+
+
+def _bash() -> str:
+    """Return a real bash executable (the WindowsApps stub is WSL, not Git Bash)."""
+    candidate = shutil.which("bash")
+    if candidate and "windowsapps" not in candidate.lower():
+        return candidate
+    fallback = Path(r"C:\Program Files\Git\bin\bash.exe")
+    if fallback.is_file():
+        return str(fallback)
+    return candidate or "bash"
 
 
 def _write_sirst4(root: Path, ids: list[str]) -> None:
@@ -689,6 +703,144 @@ class GateBCliTest(unittest.TestCase):
                 verification.returncode,
                 0 if verification_summary["overall_pass"] else 1,
             )
+
+
+class GateBShellTest(unittest.TestCase):
+    def test_script_passes_bash_syntax_check(self):
+        script = Path(__file__).resolve().parents[1] / "run_gate_b.sh"
+        result = subprocess.run(
+            [_bash(), "-n", str(script)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_smoke_run_creates_complete_verified_archive(self):
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "sirst4"
+            run_dir = tmp_path / "run"
+            _write_sirst4(root, ["one"])
+            image = np.zeros((64, 64), dtype=np.uint8)
+            image[30:34, 30:34] = 255
+            mask = np.zeros((64, 64), dtype=np.uint8)
+            mask[30:34, 30:34] = 255
+            Image.fromarray(image).save(root / "images" / "one.png")
+            Image.fromarray(mask).save(root / "masks" / "one.png")
+
+            result = subprocess.run(
+                [
+                    _bash(),
+                    str(repo / "run_gate_b.sh"),
+                ],
+                cwd=repo,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=600,
+                env={
+                    **os.environ,
+                    "SKIP_TESTS": "1",
+                    "SMOKE_TEST": "1",
+                    "DEVICE": "cpu",
+                    "EPOCHS": "1",
+                    "MAX_STEPS": "1",
+                    "SUBSET_SIZE": "1",
+                    "DATA_ROOT": str(root),
+                    "RUN_DIR": str(run_dir),
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            archive = tmp_path / "run.tar.gz"
+            self.assertTrue(archive.is_file())
+            self.assertFalse(
+                (run_dir / "run.tar.gz").exists(),
+                "archive must live beside RUN_DIR, not inside it",
+            )
+            with tarfile.open(archive) as bundle:
+                names = bundle.getnames()
+                members = {name.split("/", 1)[-1] for name in names}
+                expected = {
+                    "gate_b.log",
+                    "gate_b_summary.json",
+                    "selected_ids.json",
+                    "router_best.pt",
+                    "router_last.pt",
+                    "detail_best.pt",
+                    "detail_last.pt",
+                    "gaussamr_v1_gate_b.pt",
+                    "environment.txt",
+                    "git_revision.txt",
+                    "git_status.txt",
+                    "sha256sums.txt",
+                    "run_gate_b.sh",
+                }
+                missing = expected - members
+                self.assertFalse(missing, f"archive missing {sorted(missing)}")
+                self.assertFalse(
+                    any(name.endswith(".tar.gz") for name in names),
+                    "archive must not contain itself",
+                )
+                bundle.extractall(tmp_path / "extracted", filter="data")
+            extracted_run = next(
+                (tmp_path / "extracted").iterdir()
+            )  # single top-level RUN_DIR directory
+            verify = subprocess.run(
+                [
+                    _bash(),
+                    "-c",
+                    'cd "$1" && sha256sum -c sha256sums.txt',
+                    "verify",
+                    str(extracted_run),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
+            summary = json.loads(
+                (run_dir / "gate_b_summary.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(summary["mode"], "smoke-test")
+            self.assertFalse(summary["overall_pass"])
+
+    def test_failed_command_still_archives_and_preserves_exit_code(self):
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            run_dir = tmp_path / "run"
+
+            result = subprocess.run(
+                [
+                    _bash(),
+                    str(repo / "run_gate_b.sh"),
+                ],
+                cwd=repo,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=600,
+                env={
+                    **os.environ,
+                    "SKIP_TESTS": "1",
+                    "DEVICE": "cpu",
+                    "DATA_ROOT": str(tmp_path / "missing-dataset"),
+                    "RUN_DIR": str(run_dir),
+                },
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            archive = tmp_path / "run.tar.gz"
+            self.assertTrue(archive.is_file(), "failed runs must still archive")
+            with tarfile.open(archive) as bundle:
+                members = {name.split("/", 1)[-1] for name in bundle.getnames()}
+            self.assertIn("gate_b.log", members)
+            self.assertIn("sha256sums.txt", members)
+            self.assertIn("run_gate_b.sh", members)
 
 
 if __name__ == "__main__":

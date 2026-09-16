@@ -183,6 +183,7 @@ def build_checkpoint_payload(
     config: dict,
     train_ids: list[str],
     val_ids: list[str],
+    loader_generator: torch.Generator | None = None,
 ) -> dict[str, Any]:
     return {
         "model": model.state_dict(),
@@ -196,6 +197,9 @@ def build_checkpoint_payload(
         "train_ids": list(train_ids),
         "val_ids": list(val_ids),
         "rng_state": capture_rng_state(),
+        "loader_generator_state": (
+            loader_generator.get_state() if loader_generator is not None else None
+        ),
         "dataset_name": str(config["data"]["name"]),
         "objective_version": str(config["loss"]["objective_version"]),
         "seed": int(config["run"]["seed"]),
@@ -244,9 +248,8 @@ def _make_loader(
     shuffle: bool,
     workers: int,
     device: torch.device,
-    seed: int,
+    generator: torch.Generator,
 ) -> DataLoader:
-    generator = torch.Generator().manual_seed(seed)
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -256,7 +259,9 @@ def _make_loader(
         drop_last=shuffle,
         worker_init_fn=_seed_worker,
         generator=generator,
-        persistent_workers=workers > 0,
+        # Recreate workers for every iterator so their RNG is derived solely
+        # from the checkpointed loader generator, making epoch-boundary resume exact.
+        persistent_workers=False,
     )
 
 
@@ -365,8 +370,12 @@ def main() -> None:
     batch_size, workers = resolve_loader_settings(
         config["optim"], args.batch_size, args.num_workers
     )
-    train_loader = _make_loader(train_dataset, batch_size, True, workers, device, seed)
-    val_loader = _make_loader(val_dataset, 1, False, workers, device, seed + 1)
+    train_generator = torch.Generator().manual_seed(seed)
+    val_generator = torch.Generator().manual_seed(seed + 1)
+    train_loader = _make_loader(
+        train_dataset, batch_size, True, workers, device, train_generator
+    )
+    val_loader = _make_loader(val_dataset, 1, False, workers, device, val_generator)
 
     objective_version = validate_objective_version(config["loss"]["objective_version"])
     model = build_a_model(
@@ -398,6 +407,10 @@ def main() -> None:
         stopper.best_score = float(checkpoint["best_score"])
         stopper.bad_epochs = int(checkpoint["bad_epochs"])
         restore_rng_state(checkpoint["rng_state"])
+        loader_state = checkpoint.get("loader_generator_state")
+        if loader_state is None:
+            raise ValueError("resume checkpoint is missing loader generator state")
+        train_generator.set_state(loader_state)
     else:
         atomic_json_dump(config, run_dir / "config_snapshot.json")
         atomic_json_dump(environment_manifest(), run_dir / "environment.json")
@@ -511,6 +524,7 @@ def main() -> None:
             config=config,
             train_ids=train_ids,
             val_ids=val_ids,
+            loader_generator=train_generator,
         )
         if improved:
             save_checkpoint(run_dir / "a_best.pt", payload)

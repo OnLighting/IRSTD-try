@@ -23,6 +23,8 @@ def test_split_ids_is_disjoint_complete_and_deterministic() -> None:
     assert len(val1) == 80
     assert set(train1).isdisjoint(val1)
     assert set(train1) | set(val1) == set(ids)
+    assert train1 == [sample_id for sample_id in ids if sample_id in set(train1)]
+    assert val1 == [sample_id for sample_id in ids if sample_id in set(val1)]
 
 
 def test_split_ids_rejects_duplicate_ids() -> None:

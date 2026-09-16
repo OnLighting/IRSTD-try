@@ -6,11 +6,20 @@ import pytest
 import torch
 
 from irstd_a.diagnostics import (
+    _spearman,
     aggregate_diagnostics,
     compare_component_maps,
     component_diagnostics,
     degeneration_flags,
 )
+
+
+def test_spearman_uses_average_ranks_for_ties() -> None:
+    first = torch.tensor([1.0, 1.0, 2.0, 3.0]).numpy()
+    second = torch.tensor([4.0, 3.0, 2.0, 1.0]).numpy()
+
+    assert _spearman(first, second) == pytest.approx(-0.9486832980505138)
+    assert _spearman(first, torch.ones(4).numpy()) is None
 
 
 def _perfect_case() -> tuple[torch.Tensor, torch.Tensor, dict, dict]:
@@ -216,6 +225,37 @@ def test_degeneration_flags_detect_known_collapses() -> None:
         "background_copies_input": True,
         "residual_zero": True,
     }
+
+
+def test_v51_degeneration_flags_use_legacy_residual_metrics() -> None:
+    summary = {
+        "source_false_activation_median": 0.1,
+        "residual_energy_ratio_median": 0.95,
+        "residual_target_fraction_median": 0.6,
+        "psf_residual_overlap_median": 0.7,
+        "target_contrast_recall_median": 1.0,
+        "target_psf_zero_fraction": 0.0,
+        "background_input_correlation_median": 0.9,
+        "residual_meaningful_fraction": 0.1,
+    }
+    gates = {
+        "source_false_activation_max": 0.2,
+        "residual_energy_ratio_max": 0.9,
+        "residual_target_fraction_max": 0.5,
+        "psf_residual_overlap_max": 0.5,
+        "target_contrast_recall_min": 0.5,
+        "target_contrast_recall_max": 2.0,
+        "target_psf_zero_fraction_max": 0.25,
+        "background_input_correlation_max": 0.999,
+        "residual_meaningful_fraction_min": 0.05,
+    }
+
+    flags = degeneration_flags(summary, gates)
+
+    assert flags["residual_dominates_target"] is True
+    assert flags["residual_concentrates_on_target"] is True
+    assert flags["psf_residual_entangled"] is True
+    assert "residual_misses_teacher" not in flags
 
 
 def test_component_comparison_detects_identity_and_change() -> None:

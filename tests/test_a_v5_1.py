@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
@@ -86,6 +88,27 @@ def test_historical_v51_checkpoint_loads_and_reconstructs() -> None:
     assert output["R"].min() >= 0
     assert output["R"].max() < 1e-3
     assert torch.count_nonzero(output["reconstruction"]) > 0
+    metrics_path = checkpoint_path.parent / "per_image_metrics.csv"
+    with metrics_path.open(encoding="utf-8", newline="") as stream:
+        expected = next(
+            row for row in csv.DictReader(stream) if row["sample_id"] == sample["id"]
+        )
+    for component in ("B", "S", "T_psf", "R", "U"):
+        values = output[component][0, 0].double()
+        actual = {
+            "mean": float(values.mean()),
+            "std": float(values.std(unbiased=False)),
+            "min": float(values.min()),
+            "max": float(values.max()),
+            "energy": float(values.abs().sum()),
+        }
+        for statistic, value in actual.items():
+            assert np.isclose(
+                value,
+                float(expected[f"{component}_{statistic}"]),
+                rtol=5e-3,
+                atol=1e-6,
+            ), f"historical {component}_{statistic} mismatch"
 
 
 @pytest.mark.parametrize(

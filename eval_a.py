@@ -224,7 +224,12 @@ def checkpoint_stability(
     result: dict[str, Any] = {"available": True, "reference_epoch": reference_checkpoint.get("epoch"), "candidates": {}}
     for candidate_path in sorted(candidates):
         checkpoint = torch.load(candidate_path, map_location=device, weights_only=False)
-        candidate_model = build_a_model(**checkpoint["config"]["model"]).to(device)
+        candidate_objective = validate_objective_version(
+            checkpoint["config"]["loss"].get("objective_version", V5_2A_OBJECTIVE)
+        )
+        candidate_model = build_a_model(
+            **checkpoint["config"]["model"], objective_version=candidate_objective
+        ).to(device)
         candidate_model.load_state_dict(checkpoint["model"])
         candidate_model.eval()
         entries = []
@@ -250,6 +255,8 @@ def _evaluate_dataset(
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     records: list[dict] = []
     model_times: list[float] = []
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
     end_to_end_start = time.perf_counter()
     model.eval()
     with torch.no_grad():
@@ -283,10 +290,13 @@ def _evaluate_dataset(
     summary = aggregate_diagnostics(records)
     summary["model_latency_ms_per_image"] = 1000.0 * sum(model_times) / max(1, len(dataset))
     summary["end_to_end_imgs_per_s"] = len(dataset) / max(elapsed, 1e-8)
-    try:
-        summary["degeneration_flags"] = degeneration_flags(summary, config["diagnostics"]["gates"])
-    except (KeyError, TypeError) as error:
-        summary["degeneration_flags"] = {"not_evaluable": True, "reason": str(error)}
+    summary["parameter_count"] = sum(parameter.numel() for parameter in model.parameters())
+    summary["eval_peak_memory_mb"] = (
+        torch.cuda.max_memory_allocated(device) / (1024**2) if device.type == "cuda" else 0.0
+    )
+    summary["degeneration_flags"] = degeneration_flags(
+        summary, config["diagnostics"]["gates"]
+    )
     return records, summary
 
 

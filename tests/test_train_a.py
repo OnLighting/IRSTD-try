@@ -226,15 +226,49 @@ def test_checkpoint_payload_contains_resume_and_provenance_state() -> None:
         "train_ids",
         "val_ids",
         "rng_state",
+        "loader_generator_state",
         "dataset_name",
         "objective_version",
         "seed",
     }
+    assert payload["loader_generator_state"] is None
     assert payload["epoch"] == 3
     assert payload["train_ids"] == ["a", "b"]
     assert payload["dataset_name"] == "sirst4"
     assert payload["objective_version"] == "v5.1-ur"
     assert payload["seed"] == 42
+
+
+def test_checkpoint_payload_restores_loader_generator_sequence() -> None:
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.AdamW(model.parameters())
+    generator = torch.Generator().manual_seed(42)
+    torch.randperm(17, generator=generator)
+    payload = build_checkpoint_payload(
+        model=model,
+        optimizer=optimizer,
+        scaler=None,
+        epoch=1,
+        global_step=1,
+        best_score=0.5,
+        bad_epochs=0,
+        config={
+            "model": {},
+            "data": {"name": "irstd1k"},
+            "loss": {"objective_version": "v5.1-ur"},
+            "run": {"seed": 42},
+        },
+        train_ids=["a"],
+        val_ids=["b"],
+        loader_generator=generator,
+    )
+    restored = torch.Generator()
+    restored.set_state(payload["loader_generator_state"])
+
+    assert torch.equal(
+        torch.randperm(17, generator=generator),
+        torch.randperm(17, generator=restored),
+    )
 
 
 def test_resume_rejects_changed_training_objective() -> None:

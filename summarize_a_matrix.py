@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,8 @@ PRIMARY_METRICS = (
     "uncertainty_error_spearman_median",
     "model_latency_ms_per_image",
     "end_to_end_imgs_per_s",
+    "parameter_count",
+    "eval_peak_memory_mb",
 )
 
 
@@ -73,6 +76,12 @@ def build_matrix_summary(run_root: Path) -> dict[str, Any]:
     sources: dict[str, dict[str, Any]] = {}
     for source, run_name in SOURCE_RUNS.items():
         payload = _load_json(root / run_name / "metrics.json")
+        checkpoint_path = root / run_name / "a_best.pt"
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(f"missing matrix input: {checkpoint_path}")
+        actual_hash = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+        if payload.get("checkpoint_sha256") != actual_hash:
+            raise ValueError(f"checkpoint hash mismatch in {run_name}")
         if payload.get("source_dataset") != source:
             raise ValueError(
                 f"source_dataset mismatch in {run_name}: "
@@ -151,6 +160,11 @@ def _combine_per_image(run_root: Path, path: Path) -> None:
             raise FileNotFoundError(f"missing matrix input: {source_path}")
         with source_path.open(newline="", encoding="utf-8") as stream:
             for row in csv.DictReader(stream):
+                existing_source = row.get("source_dataset") or row.get("train_dataset")
+                if existing_source is not None and existing_source != source:
+                    raise ValueError(
+                        f"per-image source mismatch in {run_name}: {existing_source!r}"
+                    )
                 row["train_dataset"] = source
                 for key in row:
                     if key not in fields:

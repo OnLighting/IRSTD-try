@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from pathlib import Path
 
@@ -25,11 +26,14 @@ def _metric(n_images: int, offset: float) -> dict[str, float | int]:
 def _write_source_run(root: Path, source: str, run_name: str, offset: float) -> None:
     run_dir = root / run_name
     run_dir.mkdir(parents=True)
+    checkpoint = run_dir / "a_best.pt"
+    checkpoint.write_bytes(f"checkpoint:{source}".encode())
+    checkpoint_hash = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
     metrics = {
         "source_dataset": source,
         "objective_version": "v5.1-ur",
         "seed": 42,
-        "checkpoint_sha256": (source[0] * 64),
+        "checkpoint_sha256": checkpoint_hash,
         "datasets": {
             "irstd1k": _metric(201, offset),
             "sirst_uavb": _metric(600, offset + 1),
@@ -70,6 +74,15 @@ def test_summary_rejects_wrong_source_identity(tmp_path: Path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="source_dataset"):
+        build_matrix_summary(tmp_path)
+
+
+def test_summary_rejects_checkpoint_hash_mismatch(tmp_path: Path) -> None:
+    for index, (source, run_name) in enumerate(SOURCE_RUNS.items()):
+        _write_source_run(tmp_path, source, run_name, float(index))
+    (tmp_path / SOURCE_RUNS["irstd1k"] / "a_best.pt").write_bytes(b"replaced")
+
+    with pytest.raises(ValueError, match="checkpoint hash"):
         build_matrix_summary(tmp_path)
 
 

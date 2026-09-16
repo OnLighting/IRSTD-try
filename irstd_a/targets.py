@@ -24,9 +24,11 @@ def split_ids(ids: Sequence[str], val_count: int, seed: int) -> tuple[list[str],
     generator = torch.Generator(device="cpu")
     generator.manual_seed(int(seed))
     order = torch.randperm(len(clean), generator=generator).tolist()
-    val_indices = order[:val_count]
-    train_indices = order[val_count:]
-    return [clean[i] for i in train_indices], [clean[i] for i in val_indices]
+    val_indices = set(order[:val_count])
+    return (
+        [sample_id for index, sample_id in enumerate(clean) if index not in val_indices],
+        [sample_id for index, sample_id in enumerate(clean) if index in val_indices],
+    )
 
 
 def _validate_spatial_tensor(tensor: Tensor, name: str) -> None:

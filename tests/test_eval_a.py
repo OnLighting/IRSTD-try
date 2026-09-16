@@ -3,7 +3,8 @@ from __future__ import annotations
 import torch
 
 from configs import a_psf_irstd1k as config_module
-from eval_a import build_eval_datasets, predict_perturbed
+from eval_a import build_eval_datasets, checkpoint_stability, predict_perturbed
+from irstd_a.model import build_a_model
 
 
 class _IdentityModel(torch.nn.Module):
@@ -69,3 +70,41 @@ def test_intensity_perturbation_is_bounded() -> None:
     )
     assert output["B"].min() >= 0
     assert output["B"].max() <= 1
+
+
+def test_checkpoint_stability_preserves_v51_objective(
+    tmp_path, monkeypatch,
+) -> None:
+    model_config = {"dims": (8, 16, 32), "num_psf": 2, "kernel_size": 5}
+    candidate = build_a_model(**model_config, objective_version="v5.1-ur")
+    torch.save(
+        {
+            "model": candidate.state_dict(),
+            "epoch": 1,
+            "config": {
+                "model": model_config,
+                "loss": {"objective_version": "v5.1-ur"},
+            },
+        },
+        tmp_path / "a_last.pt",
+    )
+    seen: list[str] = []
+    original = build_a_model
+
+    def recording_builder(**kwargs):
+        seen.append(kwargs["objective_version"])
+        return original(**kwargs)
+
+    monkeypatch.setattr("eval_a.build_a_model", recording_builder)
+    dataset = [{"image": torch.rand(1, 16, 16)}]
+    result = checkpoint_stability(
+        candidate,
+        {"epoch": 1},
+        tmp_path / "a_best.pt",
+        dataset,
+        torch.device("cpu"),
+        probe_count=1,
+    )
+
+    assert result["available"] is True
+    assert seen == ["v5.1-ur"]

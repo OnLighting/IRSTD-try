@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 
 import numpy as np
 import torch
-from scipy import ndimage, stats
+from scipy import ndimage
 from torch import Tensor
 
 
@@ -45,8 +45,20 @@ def _spearman(first: np.ndarray, second: np.ndarray) -> float | None:
         return None
     if float(a.std()) <= EPS or float(b.std()) <= EPS:
         return None
-    result = stats.spearmanr(a, b)
-    return float(result.statistic) if np.isfinite(result.statistic) else None
+    def average_ranks(values: np.ndarray) -> np.ndarray:
+        order = np.argsort(values, kind="mergesort")
+        sorted_values = values[order]
+        ranks = np.empty(values.size, dtype=np.float64)
+        start = 0
+        while start < values.size:
+            stop = start + 1
+            while stop < values.size and sorted_values[stop] == sorted_values[start]:
+                stop += 1
+            ranks[order[start:stop]] = 0.5 * (start + stop - 1) + 1.0
+            start = stop
+        return ranks
+
+    return _pearson(average_ranks(a), average_ranks(b))
 
 
 def _centroids(binary: np.ndarray) -> np.ndarray:
@@ -291,8 +303,6 @@ def degeneration_flags(summary: Mapping[str, float], gates: Mapping[str, float])
     """Convert selected aggregate thresholds into explicit collapse flags."""
     requirements = {
         "source_false_activation_median": "source_false_activation_max",
-        "residual_abs_energy_ratio_median": "residual_abs_energy_ratio_max",
-        "residual_teacher_nmae_median": "residual_teacher_nmae_max",
         "target_psf_zero_fraction": "target_psf_zero_fraction_max",
         "background_input_correlation_median": "background_input_correlation_max",
         "residual_meaningful_fraction": "residual_meaningful_fraction_min",
@@ -302,12 +312,8 @@ def degeneration_flags(summary: Mapping[str, float], gates: Mapping[str, float])
     missing |= {"target_contrast_recall_min", "target_contrast_recall_max"} - set(gates)
     if missing:
         raise KeyError(f"missing degeneration fields: {sorted(missing)}")
-    return {
+    flags = {
         "source_dense": summary["source_false_activation_median"] > gates["source_false_activation_max"],
-        "residual_copies_input": summary["residual_abs_energy_ratio_median"]
-        > gates["residual_abs_energy_ratio_max"],
-        "residual_misses_teacher": summary["residual_teacher_nmae_median"]
-        > gates["residual_teacher_nmae_max"],
         "target_energy_miscalibrated": not (
             gates["target_contrast_recall_min"]
             <= summary["target_contrast_recall_median"]
@@ -318,6 +324,34 @@ def degeneration_flags(summary: Mapping[str, float], gates: Mapping[str, float])
         "residual_zero": summary["residual_meaningful_fraction"]
         < gates["residual_meaningful_fraction_min"],
     }
+    if "residual_teacher_nmae_max" in gates:
+        for field in ("residual_abs_energy_ratio_median", "residual_teacher_nmae_median"):
+            if field not in summary:
+                raise KeyError(f"missing degeneration field: {field}")
+        flags.update(
+            residual_copies_input=summary["residual_abs_energy_ratio_median"]
+            > gates["residual_abs_energy_ratio_max"],
+            residual_misses_teacher=summary["residual_teacher_nmae_median"]
+            > gates["residual_teacher_nmae_max"],
+        )
+    else:
+        legacy = {
+            "residual_energy_ratio_median": "residual_energy_ratio_max",
+            "residual_target_fraction_median": "residual_target_fraction_max",
+            "psf_residual_overlap_median": "psf_residual_overlap_max",
+        }
+        missing_legacy = (set(legacy) - set(summary)) | (set(legacy.values()) - set(gates))
+        if missing_legacy:
+            raise KeyError(f"missing degeneration fields: {sorted(missing_legacy)}")
+        flags.update(
+            residual_dominates_target=summary["residual_energy_ratio_median"]
+            > gates["residual_energy_ratio_max"],
+            residual_concentrates_on_target=summary["residual_target_fraction_median"]
+            > gates["residual_target_fraction_max"],
+            psf_residual_entangled=summary["psf_residual_overlap_median"]
+            > gates["psf_residual_overlap_max"],
+        )
+    return flags
 
 
 def _global_similarity(first: np.ndarray, second: np.ndarray) -> float:

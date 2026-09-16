@@ -10,6 +10,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+from .objectives import V5_1_OBJECTIVE, V5_2A_OBJECTIVE, validate_objective_version
+
 
 def _group_count(channels: int) -> int:
     for groups in (8, 4, 2, 1):
@@ -156,6 +158,7 @@ class APSFUnmixingNet(nn.Module):
         sigma_min: float = 0.6,
         sigma_max: float = 4.0,
         source_flux_scale: float = 16.0,
+        objective_version: str = V5_2A_OBJECTIVE,
     ) -> None:
         super().__init__()
         if in_ch != 1:
@@ -197,13 +200,18 @@ class APSFUnmixingNet(nn.Module):
         if source_flux_scale <= 0:
             raise ValueError("source_flux_scale must be positive")
         self.source_flux_scale = float(source_flux_scale)
+        self.objective_version = validate_objective_version(objective_version)
         self._initialize_heads()
 
     def _initialize_heads(self) -> None:
         nn.init.zeros_(self.mixing_head.weight)
         nn.init.zeros_(self.mixing_head.bias)
-        nn.init.zeros_(self.residual_head.weight)
-        nn.init.zeros_(self.residual_head.bias)
+        if self.objective_version == V5_1_OBJECTIVE:
+            nn.init.normal_(self.residual_head.weight, mean=0.0, std=0.01)
+            nn.init.constant_(self.residual_head.bias, -6.0)
+        else:
+            nn.init.zeros_(self.residual_head.weight)
+            nn.init.zeros_(self.residual_head.bias)
         for head, bias in (
             (self.presence_head, -6.0),
             (self.amplitude_head, 0.0),
@@ -243,7 +251,12 @@ class APSFUnmixingNet(nn.Module):
         source_amplitude = torch.sigmoid(amplitude_logits)
         source = source_presence * source_amplitude
         source_flux = source * self.source_flux_scale
-        residual = torch.tanh(self.residual_head(features))
+        residual_logits = self.residual_head(features)
+        residual = (
+            torch.sigmoid(residual_logits)
+            if self.objective_version == V5_1_OBJECTIVE
+            else torch.tanh(residual_logits)
+        )
         psf_weights = torch.softmax(self.mixing_head(features), dim=1)
         uncertainty_reconstruction = torch.sigmoid(self.uncertainty_head(features.detach()))
         psf_raw, kernels, params = self.psf_bank(source_flux, psf_weights)
@@ -294,6 +307,7 @@ def build_a_model(
     sigma_min: float = 0.6,
     sigma_max: float = 4.0,
     source_flux_scale: float = 16.0,
+    objective_version: str = V5_2A_OBJECTIVE,
 ) -> APSFUnmixingNet:
     return APSFUnmixingNet(
         in_ch=in_ch,
@@ -303,4 +317,5 @@ def build_a_model(
         sigma_min=sigma_min,
         sigma_max=sigma_max,
         source_flux_scale=source_flux_scale,
+        objective_version=objective_version,
     )

@@ -28,6 +28,7 @@ from irstd_a.diagnostics import (
     degeneration_flags,
 )
 from irstd_a.model import build_a_model
+from irstd_a.objectives import V5_2A_OBJECTIVE, validate_objective_version
 from irstd_a.runtime import atomic_json_dump, file_sha256
 from irstd_a.targets import build_weak_targets
 
@@ -257,6 +258,9 @@ def _evaluate_dataset(
                 ring_radius=int(config["data"]["ring_radius"]),
                 source_flux_scale=float(config["model"]["source_flux_scale"]),
                 psf_radius=int(config["model"]["kernel_size"]) // 2,
+                objective_version=str(
+                    config["loss"].get("objective_version", V5_2A_OBJECTIVE)
+                ),
             )
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
@@ -297,7 +301,12 @@ def main() -> None:
     device = torch.device(args.device)
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint["config"]
-    model = build_a_model(**config["model"]).to(device)
+    objective_version = validate_objective_version(
+        config["loss"].get("objective_version", V5_2A_OBJECTIVE)
+    )
+    model = build_a_model(
+        **config["model"], objective_version=objective_version
+    ).to(device)
     model.load_state_dict(checkpoint["model"])
     datasets = build_eval_datasets(config["data"], args.datasets)
     if args.limit:

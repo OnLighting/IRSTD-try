@@ -10,6 +10,8 @@ import torch.nn.functional as F
 from scipy import ndimage
 from torch import Tensor
 
+from .objectives import V5_2A_OBJECTIVE, validate_objective_version
+
 
 def split_ids(ids: Sequence[str], val_count: int, seed: int) -> tuple[list[str], list[str]]:
     """Return a deterministic, disjoint train/validation partition."""
@@ -149,6 +151,7 @@ def build_weak_targets(
     ring_radius: int,
     source_flux_scale: float = 16.0,
     psf_radius: int = 7,
+    objective_version: str = V5_2A_OBJECTIVE,
 ) -> dict[str, Tensor]:
     """Create centroid, support, local-background, and target-contrast maps."""
     _validate_spatial_tensor(image, "image")
@@ -164,6 +167,7 @@ def build_weak_targets(
     if not np.isfinite(source_flux_scale) or source_flux_scale <= 0:
         raise ValueError("source_flux_scale must be positive and finite")
 
+    objective_version = validate_objective_version(objective_version)
     support = dilate_mask(mask, dilation_radius)
     psf_support = dilate_mask(mask, psf_radius)
     center = centroid_map(mask, radius=0)
@@ -190,18 +194,19 @@ def build_weak_targets(
     ring_background = numerator / denominator
     local_background = torch.where(support.bool(), ring_background, image)
     target_proxy = F.relu(image - local_background) * support
-    psf_teacher = _moment_matched_psf_teacher(target_proxy, mask, psf_support)
-    residual_teacher = target_proxy - psf_teacher
     local_target_flux = F.conv2d(target_proxy, kernel, padding=ring_radius)
     source_proxy = center * (local_target_flux / float(source_flux_scale)).clamp(0.0, 1.0)
 
-    return {
+    result = {
         "center": center,
         "support": support,
         "psf_support": psf_support,
         "local_background": local_background,
         "target_proxy": target_proxy,
-        "psf_teacher": psf_teacher,
-        "residual_teacher": residual_teacher,
         "source_proxy": source_proxy,
     }
+    if objective_version == V5_2A_OBJECTIVE:
+        psf_teacher = _moment_matched_psf_teacher(target_proxy, mask, psf_support)
+        result["psf_teacher"] = psf_teacher
+        result["residual_teacher"] = target_proxy - psf_teacher
+    return result

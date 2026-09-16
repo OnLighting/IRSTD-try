@@ -95,8 +95,6 @@ def _validate_spatial_maps(
         "psf_support",
         "local_background",
         "target_proxy",
-        "psf_teacher",
-        "residual_teacher",
         "source_proxy",
     ):
         if key not in targets or targets[key].shape != image.shape:
@@ -128,7 +126,11 @@ def component_diagnostics(
         psf_support = _to_numpy(targets["psf_support"][index, 0])
         local_background = _to_numpy(targets["local_background"][index, 0])
         proxy = _to_numpy(targets["target_proxy"][index, 0])
-        residual_teacher = _to_numpy(targets["residual_teacher"][index, 0])
+        residual_teacher = (
+            _to_numpy(targets["residual_teacher"][index, 0])
+            if "residual_teacher" in targets
+            else None
+        )
         source_proxy = _to_numpy(targets["source_proxy"][index, 0])
         maps = {key: _to_numpy(prediction[key][index, 0]) for key in COMPONENT_KEYS}
         reconstruction = _to_numpy(prediction["reconstruction"][index, 0])
@@ -177,10 +179,6 @@ def component_diagnostics(
             "residual_energy_ratio": _safe_ratio(residual_energy, total_target_output),
             "residual_target_fraction": _safe_ratio(residual_target_energy, target_energy),
             "residual_abs_energy_ratio": _safe_ratio(residual_energy, proxy_energy),
-            "residual_teacher_nmae": _safe_ratio(
-                float((np.abs(maps["R"] - residual_teacher) * psf_support).sum()),
-                proxy_energy,
-            ),
             "residual_detail_gain": residual_detail_gain,
             "residual_outside_abs_fraction": _safe_ratio(
                 float((np.abs(maps["R"]) * (1.0 - psf_support)).sum()), residual_energy
@@ -203,6 +201,11 @@ def component_diagnostics(
                 and residual_detail_gain >= 0.01 - EPS
             ),
         }
+        if residual_teacher is not None:
+            record["residual_teacher_nmae"] = _safe_ratio(
+                float((np.abs(maps["R"] - residual_teacher) * psf_support).sum()),
+                proxy_energy,
+            )
         if "source_presence" in prediction:
             presence = _to_numpy(prediction["source_presence"][index, 0])
             amplitude = _to_numpy(prediction["source_amplitude"][index, 0])

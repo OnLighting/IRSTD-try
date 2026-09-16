@@ -24,6 +24,7 @@ from irstd_g0.data import IRSTD1KDataset
 from irstd_a.diagnostics import aggregate_diagnostics, component_diagnostics
 from irstd_a.losses import APSFUnmixingLoss
 from irstd_a.model import build_a_model
+from irstd_a.objectives import V5_1_OBJECTIVE, V5_2A_OBJECTIVE, validate_objective_version
 from irstd_a.runtime import (
     atomic_json_dump,
     capture_rng_state,
@@ -48,7 +49,10 @@ def load_config(path: str) -> dict[str, Any]:
     return config
 
 
-def validation_score(summary: Mapping[str, Any]) -> float:
+def validation_score(
+    summary: Mapping[str, Any],
+    objective_version: str = V5_2A_OBJECTIVE,
+) -> float:
     """Lower is better; missing interpretability metrics receive a full penalty."""
     def value(name: str, default: float) -> float:
         item = summary.get(name)
@@ -65,15 +69,24 @@ def validation_score(summary: Mapping[str, Any]) -> float:
     residual_detail_gain = value("residual_detail_gain_mean", -1.0)
     background_leakage = value("background_target_leakage_median", 1.0)
     recall_error = abs(math.log(min(max(recall, 1e-3), 1e3)))
-    return (
+    common = (
         reconstruction
         + 0.5 * (1.0 - min(precision, 1.0))
         + 0.25 * recall_error
         + 0.5 * source_false
         + 0.5 * (1.0 - min(max(centroid_recall, 0.0), 1.0))
         + 0.25 * max(0.0, 0.30 - uncertainty_spearman)
-        + 0.1 * max(0.0, 1.0 - residual_meaningful / 0.05)
         + 0.5 * background_leakage
+    )
+    objective_version = validate_objective_version(objective_version)
+    residual_penalty = 0.1 * max(0.0, 1.0 - residual_meaningful / 0.05)
+    if objective_version == V5_1_OBJECTIVE:
+        overlap = value("psf_residual_overlap_median", 1.0)
+        residual_target = value("residual_target_fraction_median", 1.0)
+        return common + residual_penalty + 0.1 * overlap + 0.25 * residual_target
+    return (
+        common
+        + residual_penalty
         + 0.1 * min(max(residual_teacher_nmae, 0.0), 2.0)
         + 0.1 * max(0.0, -residual_detail_gain)
     )
@@ -230,6 +243,7 @@ def _validate_epoch(
     source_flux_scale: float,
     psf_radius: int,
     amp_enabled: bool,
+    objective_version: str = V5_2A_OBJECTIVE,
 ) -> dict[str, Any]:
     model.eval()
     records: list[dict] = []
@@ -245,6 +259,7 @@ def _validate_epoch(
                 ring_radius=int(data_config["ring_radius"]),
                 source_flux_scale=source_flux_scale,
                 psf_radius=psf_radius,
+                objective_version=objective_version,
             )
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
                 prediction = model(image, return_aux=True)
@@ -310,7 +325,10 @@ def main() -> None:
     train_loader = _make_loader(train_dataset, batch_size, True, workers, device, seed)
     val_loader = _make_loader(val_dataset, 1, False, workers, device, seed + 1)
 
-    model = build_a_model(**config["model"]).to(device)
+    objective_version = validate_objective_version(config["loss"]["objective_version"])
+    model = build_a_model(
+        **config["model"], objective_version=objective_version
+    ).to(device)
     criterion = APSFUnmixingLoss(**config["loss"]).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -371,6 +389,7 @@ def main() -> None:
                 ring_radius=int(config["data"]["ring_radius"]),
                 source_flux_scale=float(config["model"]["source_flux_scale"]),
                 psf_radius=int(config["model"]["kernel_size"]) // 2,
+                objective_version=objective_version,
             )
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
                 prediction = model(image, return_aux=True)
@@ -402,8 +421,9 @@ def main() -> None:
             float(config["model"]["source_flux_scale"]),
             int(config["model"]["kernel_size"]) // 2,
             amp_enabled,
+            objective_version,
         )
-        score = validation_score(validation)
+        score = validation_score(validation, objective_version=objective_version)
         improved = stopper.update(score)
         averages = {name: value / max(1, batches) for name, value in sums.items()}
         peak_memory_mb = (

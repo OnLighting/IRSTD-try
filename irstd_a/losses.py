@@ -10,6 +10,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+from .objectives import V5_1_OBJECTIVE, V5_2A_OBJECTIVE, validate_objective_version
+
 
 LOSS_NAMES = (
     "rec",
@@ -59,7 +61,9 @@ class APSFUnmixingLoss(nn.Module):
         if any(float(weights[name]) < 0 for name in LOSS_NAMES):
             raise ValueError("loss weights must be non-negative")
         self.weights = {name: float(weights[name]) for name in LOSS_NAMES}
-        self.objective_version = objective_version
+        self.objective_version = validate_objective_version(
+            objective_version or V5_2A_OBJECTIVE
+        )
 
     @staticmethod
     def _require_keys(container: Mapping, names: set[str], label: str) -> None:
@@ -108,20 +112,17 @@ class APSFUnmixingLoss(nn.Module):
             },
             "prediction",
         )
-        self._require_keys(
-            targets,
-            {
+        required_targets = {
                 "center",
                 "support",
                 "psf_support",
                 "local_background",
                 "target_proxy",
-                "psf_teacher",
-                "residual_teacher",
                 "source_proxy",
-            },
-            "targets",
-        )
+        }
+        if self.objective_version == V5_2A_OBJECTIVE:
+            required_targets.update({"psf_teacher", "residual_teacher"})
+        self._require_keys(targets, required_targets, "targets")
         if image.shape != mask.shape:
             raise ValueError("image and mask must have the same shape")
 
@@ -150,8 +151,6 @@ class APSFUnmixingLoss(nn.Module):
         source_proxy = targets["source_proxy"]
         local_background = targets["local_background"]
         target_proxy = targets["target_proxy"]
-        psf_teacher = targets["psf_teacher"]
-        residual_teacher = targets["residual_teacher"]
         error = image - reconstruction
         scale = 0.01 + 0.49 * uncertainty.clamp(0.0, 1.0)
 
@@ -188,60 +187,83 @@ class APSFUnmixingLoss(nn.Module):
         spatial_dims = (-1, -2, -3)
         proxy_energy = target_proxy.float().sum(dim=spatial_dims)
         safe_proxy_energy = proxy_energy.clamp_min(1e-6)
-        psf_fit = (
-            (psf.float() - psf_teacher.float()).abs() * targets["psf_support"].float()
-        ).sum(dim=spatial_dims) / safe_proxy_energy
-        total_target_fit = (
-            (target_output.float() - target_proxy.float()).abs()
-            * targets["psf_support"].float()
-        ).sum(dim=spatial_dims) / safe_proxy_energy
-        target_energy = (
-            target_output.float() * targets["psf_support"].float()
-        ).sum(dim=spatial_dims)
-        target_energy_error = (target_energy - proxy_energy).abs() / safe_proxy_energy
-        target_negative = (
-            F.relu(-target_output.float()) * targets["psf_support"].float()
-        ).sum(dim=spatial_dims) / safe_proxy_energy
+        target_energy_error = (
+            (target_output.float() * (
+                support.float()
+                if self.objective_version == V5_1_OBJECTIVE
+                else targets["psf_support"].float()
+            )).sum(dim=spatial_dims) - proxy_energy
+        ).abs() / safe_proxy_energy
         target_leakage = torch.log1p(
             (target_output.float().abs() * psf_outside.float()).sum(dim=spatial_dims)
             / safe_proxy_energy
         )
-        present_target_loss = (
-            psf_fit
-            + total_target_fit
-            + target_energy_error
-            + target_negative
-            + 2.0 * target_leakage
-        )
-        empty_target_loss = (
-            psf.float().abs() + residual.float().abs()
-        ).mean(dim=spatial_dims)
+        if self.objective_version == V5_1_OBJECTIVE:
+            target_fit = (
+                (target_output.float() - target_proxy.float()).abs() * support.float()
+            ).sum(dim=spatial_dims) / safe_proxy_energy
+            present_target_loss = target_fit + target_energy_error + 2.0 * target_leakage
+            empty_target_loss = target_output.float().abs().mean(dim=spatial_dims)
+        else:
+            psf_teacher = targets["psf_teacher"]
+            residual_teacher = targets["residual_teacher"]
+            psf_fit = (
+                (psf.float() - psf_teacher.float()).abs()
+                * targets["psf_support"].float()
+            ).sum(dim=spatial_dims) / safe_proxy_energy
+            total_target_fit = (
+                (target_output.float() - target_proxy.float()).abs()
+                * targets["psf_support"].float()
+            ).sum(dim=spatial_dims) / safe_proxy_energy
+            target_negative = (
+                F.relu(-target_output.float()) * targets["psf_support"].float()
+            ).sum(dim=spatial_dims) / safe_proxy_energy
+            present_target_loss = (
+                psf_fit + total_target_fit + target_energy_error
+                + target_negative + 2.0 * target_leakage
+            )
+            empty_target_loss = (
+                psf.float().abs() + residual.float().abs()
+            ).mean(dim=spatial_dims)
         target = torch.where(
             proxy_energy > 1e-6,
             present_target_loss,
             empty_target_loss,
         ).mean()
 
-        residual_fit = (
-            (residual.float() - residual_teacher.float()).abs()
-            * targets["psf_support"].float()
-        ).sum(dim=spatial_dims) / safe_proxy_energy
-        residual_fit = torch.where(
-            proxy_energy > 1e-6,
-            residual_fit,
-            residual.float().abs().mean(dim=spatial_dims),
-        ).mean()
-        residual_loss = residual_fit + (
-            2.0 * _masked_mean(residual.abs(), psf_outside)
-            + 0.1 * residual.abs().mean()
-            + 0.2 * _edge_aware_tv(residual, image)
-        )
+        if self.objective_version == V5_1_OBJECTIVE:
+            residual_loss = (
+                2.0 * _masked_mean(residual.abs(), outside)
+                + 0.1 * residual.abs().mean()
+                + 0.2 * _edge_aware_tv(residual, image)
+            )
+        else:
+            residual_fit = (
+                (residual.float() - residual_teacher.float()).abs()
+                * targets["psf_support"].float()
+            ).sum(dim=spatial_dims) / safe_proxy_energy
+            residual_fit = torch.where(
+                proxy_energy > 1e-6,
+                residual_fit,
+                residual.float().abs().mean(dim=spatial_dims),
+            ).mean()
+            residual_loss = residual_fit + (
+                2.0 * _masked_mean(residual.abs(), psf_outside)
+                + 0.1 * residual.abs().mean()
+                + 0.2 * _edge_aware_tv(residual, image)
+            )
         background_detail = _high_frequency(background).abs()
         target_detail = target_output.abs()
         detail_overlap = (background_detail * target_detail).sum() / torch.sqrt(
             background_detail.square().sum() * target_detail.square().sum()
         ).clamp_min(1e-6)
-        independence = 0.25 * detail_overlap
+        if self.objective_version == V5_1_OBJECTIVE:
+            overlap = (psf.abs() * residual.abs()).sum() / torch.sqrt(
+                psf.square().sum() * residual.square().sum()
+            ).clamp_min(1e-6)
+            independence = overlap + 0.25 * detail_overlap
+        else:
+            independence = 0.25 * detail_overlap
         psf_diversity = self._psf_diversity(params)
 
         detached_error = error.detach().abs()

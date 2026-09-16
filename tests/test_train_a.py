@@ -193,7 +193,12 @@ def test_checkpoint_payload_contains_resume_and_provenance_state() -> None:
         global_step=17,
         best_score=0.4,
         bad_epochs=2,
-        config={"model": {"dims": (8, 16, 32)}},
+        config={
+            "model": {"dims": (8, 16, 32)},
+            "data": {"name": "sirst4"},
+            "loss": {"objective_version": "v5.1-ur"},
+            "run": {"seed": 42},
+        },
         train_ids=["a", "b"],
         val_ids=["c"],
     )
@@ -209,9 +214,15 @@ def test_checkpoint_payload_contains_resume_and_provenance_state() -> None:
         "train_ids",
         "val_ids",
         "rng_state",
+        "dataset_name",
+        "objective_version",
+        "seed",
     }
     assert payload["epoch"] == 3
     assert payload["train_ids"] == ["a", "b"]
+    assert payload["dataset_name"] == "sirst4"
+    assert payload["objective_version"] == "v5.1-ur"
+    assert payload["seed"] == 42
 
 
 def test_resume_rejects_changed_training_objective() -> None:

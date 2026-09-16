@@ -22,7 +22,12 @@ from torch.utils.data import Dataset
 
 def _read_split(path: str) -> list[str]:
     with open(path, "r", encoding="utf-8") as f:
-        return [line.strip() for line in f if line.strip()]
+        ids = [line.strip() for line in f if line.strip()]
+    if not ids:
+        raise ValueError(f"split is empty: {path}")
+    if len(ids) != len(set(ids)):
+        raise ValueError(f"split contains duplicate IDs: {path}")
+    return ids
 
 
 def _resolve_sirst(idx: str, root: str) -> str:
@@ -65,10 +70,12 @@ class IRSTD1KDataset(Dataset):
 # -----------------------------------------------------------------------------
 
 class SIRSTUAVBDataset(Dataset):
-    """Cross-dataset eval only. Splits in data/SIRST-UAVB_OnlyUAV_Form/img_idx/."""
+    """SIRST-UAVB split in data/SIRST-UAVB_OnlyUAV_Form/img_idx/."""
 
-    def __init__(self, root: str, split: str = "test"):
+    def __init__(self, root: str, split: str = "test", augment: bool = False):
         self.root = root
+        self.split = split
+        self.augment = augment and split == "train"
         ids = _read_split(os.path.join(root, "img_idx", f"{split}.txt"))
         self.ids = ids
 
@@ -82,6 +89,8 @@ class SIRSTUAVBDataset(Dataset):
         # SIRST-UAVB masks carry a "_mask" suffix (e.g. 2401_mask.png).
         msk = np.asarray(Image.open(os.path.join(self.root, "masks", f"{sid}_mask.png")).convert("L"), dtype=np.float32)
         msk = (msk > 127).astype(np.float32)
+        if self.augment:
+            img, msk = _augment(img, msk)
         img = _normalize(img)
         return {
             "image": torch.from_numpy(img).unsqueeze(0),
@@ -91,10 +100,12 @@ class SIRSTUAVBDataset(Dataset):
 
 
 class SIRST4Dataset(Dataset):
-    """Cross-dataset eval only. Splits in data/SIRST4-ForLiTE/img_idx/."""
+    """SIRST4 split in data/SIRST4-ForLiTE/img_idx/."""
 
-    def __init__(self, root: str, split: str = "test"):
+    def __init__(self, root: str, split: str = "test", augment: bool = False):
         self.root = root
+        self.split = split
+        self.augment = augment and split == "train"
         # Use the original test split names; for SIRST4 "test.txt" == "test_SIRST4.txt".
         ids = _read_split(os.path.join(root, "img_idx", f"{split}.txt"))
         self.ids = ids
@@ -108,6 +119,8 @@ class SIRST4Dataset(Dataset):
         img = np.asarray(Image.open(os.path.join(self.root, "images", f"{sid}.png")).convert("L"), dtype=np.float32)
         msk = np.asarray(Image.open(os.path.join(self.root, "masks", f"{sid}.png")).convert("L"), dtype=np.float32)
         msk = (msk > 127).astype(np.float32)
+        if self.augment:
+            img, msk = _augment(img, msk)
         img = _normalize(img)
         return {
             "image": torch.from_numpy(img).unsqueeze(0),
@@ -162,9 +175,7 @@ def build_dataset(spec: DatasetSpec) -> Dataset:
     if spec.name == "irstd1k":
         return IRSTD1KDataset(spec.root, split=spec.split, augment=spec.augment)
     if spec.name == "sirst_uavb":
-        assert not spec.augment, "SIRST-UAVB is eval-only"
-        return SIRSTUAVBDataset(spec.root, split=spec.split)
+        return SIRSTUAVBDataset(spec.root, split=spec.split, augment=spec.augment)
     if spec.name == "sirst4":
-        assert not spec.augment, "SIRST4 is eval-only"
-        return SIRST4Dataset(spec.root, split=spec.split)
-    raise ValueError(f"Unknown dataset: {spec.name}")
+        return SIRST4Dataset(spec.root, split=spec.split, augment=spec.augment)
+    raise ValueError(f"unknown dataset: {spec.name}")

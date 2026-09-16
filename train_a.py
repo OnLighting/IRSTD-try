@@ -16,11 +16,11 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 from torch import Tensor
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from irstd_g0.data import IRSTD1KDataset
+from irstd_g0.data import DatasetSpec, build_dataset
 from irstd_a.diagnostics import aggregate_diagnostics, component_diagnostics
 from irstd_a.losses import APSFUnmixingLoss
 from irstd_a.model import build_a_model
@@ -174,6 +174,9 @@ def build_checkpoint_payload(
         "train_ids": list(train_ids),
         "val_ids": list(val_ids),
         "rng_state": capture_rng_state(),
+        "dataset_name": str(config["data"]["name"]),
+        "objective_version": str(config["loss"]["objective_version"]),
+        "seed": int(config["run"]["seed"]),
     }
 
 
@@ -214,7 +217,7 @@ def _move_targets(targets: Mapping[str, Tensor], device: torch.device) -> dict[s
 
 
 def _make_loader(
-    dataset: IRSTD1KDataset,
+    dataset: Dataset,
     batch_size: int,
     shuffle: bool,
     workers: int,
@@ -233,6 +236,32 @@ def _make_loader(
         generator=generator,
         persistent_workers=workers > 0,
     )
+
+
+def build_training_datasets(
+    data_config: Mapping[str, Any],
+    seed: int,
+    limit_train: int = 0,
+    limit_val: int = 0,
+) -> tuple[Dataset, Dataset, list[str], list[str]]:
+    name = str(data_config["name"])
+    root = str(data_config["root"])
+    split = str(data_config["train_split"])
+    full = build_dataset(DatasetSpec(name=name, root=root, split=split, augment=False))
+    train_ids, val_ids = split_ids(
+        full.ids,
+        val_count=int(data_config["val_count"]),
+        seed=int(data_config.get("split_seed", seed)),
+    )
+    if limit_train:
+        train_ids = train_ids[:limit_train]
+    if limit_val:
+        val_ids = val_ids[:limit_val]
+    train = build_dataset(DatasetSpec(name=name, root=root, split=split, augment=True))
+    val = build_dataset(DatasetSpec(name=name, root=root, split=split, augment=False))
+    train.ids = train_ids
+    val.ids = val_ids
+    return train, val, train_ids, val_ids
 
 
 def _validate_epoch(
@@ -305,20 +334,9 @@ def main() -> None:
     jsonl_path = run_dir / "train.jsonl"
     _seed_everything(seed)
 
-    full_train = IRSTD1KDataset(config["data"]["root"], split=config["data"]["train_split"], augment=True)
-    train_ids, val_ids = split_ids(
-        full_train.ids,
-        val_count=int(config["data"]["val_count"]),
-        seed=int(config["data"]["split_seed"]),
+    train_dataset, val_dataset, train_ids, val_ids = build_training_datasets(
+        config["data"], seed, args.limit_train, args.limit_val
     )
-    if args.limit_train:
-        train_ids = train_ids[: args.limit_train]
-    if args.limit_val:
-        val_ids = val_ids[: args.limit_val]
-    train_dataset = IRSTD1KDataset(config["data"]["root"], split=config["data"]["train_split"], augment=True)
-    val_dataset = IRSTD1KDataset(config["data"]["root"], split=config["data"]["train_split"], augment=False)
-    train_dataset.ids = train_ids
-    val_dataset.ids = val_ids
 
     workers = int(config["optim"].get("num_workers", 4))
     batch_size = int(config["optim"]["batch_size"])

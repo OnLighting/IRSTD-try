@@ -26,6 +26,7 @@ def test_dataset_routing_separates_sirst4_overlap() -> None:
     assert sizes == {
         "irstd1k": 201,
         "sirst_uavb": 600,
+        "sirst4_all": 1067,
         "sirst4_xdu": 201,
         "sirst4_non_xdu": 866,
     }

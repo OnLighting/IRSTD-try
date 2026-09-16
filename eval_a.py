@@ -42,7 +42,7 @@ def build_eval_datasets(
     for name in names:
         if name == "irstd1k":
             dataset = IRSTD1KDataset(
-                data_config["root"],
+                data_config.get("irstd1k_root", data_config["root"]),
                 split=data_config.get("test_split", "test"),
                 augment=False,
             )
@@ -57,7 +57,13 @@ def build_eval_datasets(
             non_xdu = SIRST4Dataset(data_config["sirst4_root"], split="test")
             xdu.ids = [sample_id for sample_id in all_samples.ids if sample_id.startswith("XDU")]
             non_xdu.ids = [sample_id for sample_id in all_samples.ids if not sample_id.startswith("XDU")]
-            result.extend((("sirst4_xdu", xdu), ("sirst4_non_xdu", non_xdu)))
+            result.extend(
+                (
+                    ("sirst4_all", all_samples),
+                    ("sirst4_xdu", xdu),
+                    ("sirst4_non_xdu", non_xdu),
+                )
+            )
         else:
             raise ValueError(f"unknown evaluation dataset: {name}")
     return result
@@ -301,6 +307,8 @@ def main() -> None:
     device = torch.device(args.device)
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint["config"]
+    source_dataset = str(config["data"].get("name", "irstd1k"))
+    seed = int(checkpoint.get("seed", config["run"]["seed"]))
     objective_version = validate_objective_version(
         config["loss"].get("objective_version", V5_2A_OBJECTIVE)
     )
@@ -320,6 +328,9 @@ def main() -> None:
         records, summary = _evaluate_dataset(
             model, dataset, name, device, config, args.batch_size
         )
+        for record in records:
+            record["source_dataset"] = source_dataset
+            record["objective_version"] = objective_version
         all_records.extend(records)
         summaries[name] = summary
 
@@ -349,6 +360,9 @@ def main() -> None:
         "checkpoint_sha256": file_sha256(checkpoint_path),
         "checkpoint_epoch": checkpoint.get("epoch"),
         "device": str(device),
+        "source_dataset": source_dataset,
+        "objective_version": objective_version,
+        "seed": seed,
         "datasets": summaries,
         "sirst4_overlap_note": "sirst4_xdu duplicates the 201-image IRSTD-1K test subset",
     }

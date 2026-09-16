@@ -1,0 +1,20 @@
+[A] device=cuda seed=42 params=411,324 train=720 val=80
+/root/autodl-tmp/test_model/irstd_a/model.py:137: UserWarning: Plan failed with a cudnnException: CUDNN_BACKEND_EXECUTION_PLAN_DESCRIPTOR: cudnnFinalize Descriptor Failed cudnn_status: CUDNN_STATUS_NOT_SUPPORTED (Triggered internally at ../aten/src/ATen/native/cudnn/Conv_v8.cpp:919.)
+  F.conv2d(
+/root/miniconda3/lib/python3.12/site-packages/torch/autograd/graph.py:744: UserWarning: Plan failed with a cudnnException: CUDNN_BACKEND_EXECUTION_PLAN_DESCRIPTOR: cudnnFinalize Descriptor Failed cudnn_status: CUDNN_STATUS_NOT_SUPPORTED (Triggered internally at ../aten/src/ATen/native/cudnn/Conv_v8.cpp:919.)
+  return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+Traceback (most recent call last):
+  File "/root/autodl-tmp/test_model/train_a.py", line 429, in <module>
+    main()
+  File "/root/autodl-tmp/test_model/train_a.py", line 357, in main
+    total, terms = criterion(image, mask, prediction, targets)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/miniconda3/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/miniconda3/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/autodl-tmp/test_model/irstd_a/losses.py", line 203, in forward
+    raise FloatingPointError(f"non-finite loss term {name}: {scalars}")
+FloatingPointError: non-finite loss term center: {'rec': -0.4899474084377289, 'bg': 0.2742663025856018, 'center': 'tensor(nan)', 'sparse': 0.0025175181217491627, 'target': 1.126353144645691, 'residual': 0.005780444014817476, 'independence': 0.47169506549835205, 'psf_diversity': 0.0, 'uncertainty': 0.09464345872402191}

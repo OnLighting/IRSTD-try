@@ -1,0 +1,1 @@
+[A] device=cuda seed=42 params=411,324 train=720 val=80

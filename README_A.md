@@ -144,6 +144,40 @@ python visualize_a.py \
   --max-panels 12 --device cuda
 ```
 
+## v5.1 three-dataset generalization matrix
+
+`run_a_v5_1_matrix.sh` reproduces the historical `v5.1-ur` objective, trains
+one model on each official training split, and evaluates every best checkpoint
+on IRSTD-1K, SIRST-UAVB, and SIRST4. On a Linux CUDA host, run:
+
+```bash
+bash run_a_v5_1_matrix.sh
+```
+
+The same command resumes any directory containing a compatible `a_last.pt` and
+skips a training run only when its completion marker and best checkpoint both
+validate. It expects split counts of 800/201 for IRSTD-1K, 2400/600 for
+SIRST-UAVB, and 2285/1067 for SIRST4. It never installs or replaces PyTorch.
+
+For a wiring-only smoke run:
+
+```bash
+SMOKE=1 DEVICE=cpu NUM_WORKERS=0 LIMIT_TRAIN=4 LIMIT_VAL=2 EPOCHS=1 \
+RUN_ROOT=runs/a_v5_1_matrix/debug/smoke bash run_a_v5_1_matrix.sh
+```
+
+Formal artifacts are isolated below `runs/a_v5_1_matrix/`. The final products
+include three best checkpoints, per-source metrics, `matrix_summary.json`,
+`matrix_summary.csv`, a combined per-image CSV, `matrix_manifest.sha256`, and
+`runs/a_v5_1_matrix.tar.gz`. SIRST4 is reported as the full official test set,
+its duplicated 201-image XDU subset, and the clean 866-image non-XDU subset.
+
+Stage A is a physical decomposition model rather than a segmentation model, so
+this experiment reports target recovery, background leakage, reconstruction,
+uncertainty, stability, and runtime diagnostics—not segmentation IoU. The
+v5.1-to-G0 segmentation experiment remains separate and is not implemented by
+this runner.
+
 ## Result interpretation
 
 The main quantitative artifacts are `metrics.json`, `stability.json`, and

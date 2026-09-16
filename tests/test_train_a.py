@@ -14,6 +14,7 @@ from train_a import (
     validate_resume_config,
     validate_run_args,
     validation_score,
+    resolve_loader_settings,
 )
 
 
@@ -168,6 +169,17 @@ def test_debug_limits_cannot_write_to_formal_run() -> None:
     with pytest.raises(ValueError, match="--debug"):
         validate_run_args(Path("runs/a_psf/formal"), debug=False, limit_train=8, limit_val=4)
     validate_run_args(Path("runs/a_psf/debug/smoke"), debug=True, limit_train=8, limit_val=4)
+
+
+def test_loader_settings_accept_positive_cli_overrides() -> None:
+    config = {"batch_size": 4, "num_workers": 3}
+
+    assert resolve_loader_settings(config, None, None) == (4, 3)
+    assert resolve_loader_settings(config, 1, 0) == (1, 0)
+    with pytest.raises(ValueError, match="batch size"):
+        resolve_loader_settings(config, 0, None)
+    with pytest.raises(ValueError, match="workers"):
+        resolve_loader_settings(config, None, -1)
 
 
 def test_early_stopper_tracks_improvement_and_patience() -> None:

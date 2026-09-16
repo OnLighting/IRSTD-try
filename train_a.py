@@ -130,6 +130,28 @@ def validate_resume_config(
         raise ValueError("resume checkpoint training config does not match current config")
 
 
+def resolve_loader_settings(
+    optim_config: Mapping[str, Any],
+    batch_size_override: int | None,
+    workers_override: int | None,
+) -> tuple[int, int]:
+    batch_size = int(
+        batch_size_override
+        if batch_size_override is not None
+        else optim_config["batch_size"]
+    )
+    workers = int(
+        workers_override
+        if workers_override is not None
+        else optim_config.get("num_workers", 4)
+    )
+    if batch_size <= 0:
+        raise ValueError("batch size must be positive")
+    if workers < 0:
+        raise ValueError("workers must be non-negative")
+    return batch_size, workers
+
+
 @dataclass
 class EarlyStopper:
     patience: int
@@ -312,6 +334,8 @@ def main() -> None:
     parser.add_argument("--limit-train", type=int, default=0)
     parser.add_argument("--limit-val", type=int, default=0)
     parser.add_argument("--epochs", type=int)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--num-workers", type=int)
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -338,8 +362,9 @@ def main() -> None:
         config["data"], seed, args.limit_train, args.limit_val
     )
 
-    workers = int(config["optim"].get("num_workers", 4))
-    batch_size = int(config["optim"]["batch_size"])
+    batch_size, workers = resolve_loader_settings(
+        config["optim"], args.batch_size, args.num_workers
+    )
     train_loader = _make_loader(train_dataset, batch_size, True, workers, device, seed)
     val_loader = _make_loader(val_dataset, 1, False, workers, device, seed + 1)
 

@@ -9,6 +9,7 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy import ndimage
 from torch.utils.data import DataLoader
 
 from irstd_g0.data import SIRST4Dataset
@@ -37,6 +38,43 @@ class GateBThresholds:
     n_iou: float = 0.90
     coverage_at_24: float = 1.00
     coverage_at_8: float = 0.95
+    support_coverage_at_8: float = 0.95
+
+
+def detail_support_diagnostics(
+    proposals: torch.Tensor,
+    mask: torch.Tensor,
+    k2: int = 8,
+) -> dict[str, float | int]:
+    """Return target-pixel coverage by the actual K2 editable support."""
+    if proposals.shape[0] != 1:
+        raise ValueError("support diagnostics expect batch size 1")
+    selected, _ = select_detail_proposals(proposals, k=k2)
+    selected = selected[0]
+    array = mask.detach().cpu().numpy().squeeze() > 0.5
+    if array.ndim != 2:
+        raise ValueError("mask must have shape (H,W), (1,H,W), or (1,1,H,W)")
+    labels, target_count = ndimage.label(
+        array, structure=np.ones((3, 3), dtype=np.uint8)
+    )
+    support_fraction_sum = 0.0
+    fully_supported = 0
+    for label_id in range(1, target_count + 1):
+        ys, xs = np.nonzero(labels == label_id)
+        x = torch.as_tensor(xs, device=selected.device, dtype=selected.dtype)
+        y = torch.as_tensor(ys, device=selected.device, dtype=selected.dtype)
+        sigma = selected[:, 3:5].clamp(0.5, 8.0)
+        dx = (x[:, None] - selected[None, :, 1]) / sigma[None, :, 0]
+        dy = (y[:, None] - selected[None, :, 2]) / sigma[None, :, 1]
+        covered = (dx.square() + dy.square() <= 9).any(dim=1)
+        fraction = float(covered.float().mean().item())
+        support_fraction_sum += fraction
+        fully_supported += int(bool(covered.all().item()))
+    return {
+        "targets": int(target_count),
+        "support_fraction_sum": support_fraction_sum,
+        "fully_supported": fully_supported,
+    }
 
 
 def router_gate_passes(
@@ -45,6 +83,8 @@ def router_gate_passes(
     return (
         metrics["coverage_at_24"] >= thresholds.coverage_at_24
         and metrics["coverage_at_8"] >= thresholds.coverage_at_8
+        and metrics["support_coverage_at_8"]
+        >= thresholds.support_coverage_at_8
     )
 
 
@@ -182,6 +222,8 @@ def evaluate_gate_b(
         )
     }
     router_loss_sum = 0.0
+    support_fraction_sum = 0.0
+    fully_supported = 0
     image_count = 0
 
     for batch in loader:
@@ -193,13 +235,18 @@ def evaluate_gate_b(
         router_loss_sum += float(router_loss(maps, instances)["total"].item())
         proposals = decode_proposals(maps, k=k1)
         diagnostics = proposal_diagnostics(proposals, instances)
+        selected, indices = select_detail_proposals(proposals, k=k2)
+        selected_diagnostics = proposal_diagnostics(selected, instances)
         for name in counters:
-            counters[name] += float(diagnostics.get(name, 0))
+            source = selected_diagnostics if name == "hits_at_8" else diagnostics
+            counters[name] += float(source.get(name, 0))
+        support = detail_support_diagnostics(proposals, mask[0], k2=k2)
+        support_fraction_sum += float(support["support_fraction_sum"])
+        fully_supported += int(support["fully_supported"])
 
         gaussian_logits = composer(proposals, mask.shape[-2:])
         gaussian_metrics.update_batch(torch.sigmoid(gaussian_logits), mask)
         if detail_refiner is not None:
-            selected, indices = select_detail_proposals(proposals, k=k2)
             residual = detail_refiner(features, selected)
             full_residual = scatter_detail_residual(
                 residual, indices, proposal_count=proposals.shape[1]
@@ -219,6 +266,10 @@ def evaluate_gate_b(
         "coverage_at_8": counters["hits_at_8"] / targets if targets else 1.0,
         "coverage_at_16": counters["hits_at_16"] / targets if targets else 1.0,
         "coverage_at_24": counters["hits_at_24"] / targets if targets else 1.0,
+        "support_coverage_at_8": (
+            support_fraction_sum / targets if targets else 1.0
+        ),
+        "fully_supported_at_8": fully_supported,
         "matched": matched,
         "matched_center_error_px": (
             counters["center_error_sum"] / matched if matched else None

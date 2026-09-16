@@ -39,6 +39,7 @@ SMOKE_THRESHOLDS = GateBThresholds(
     n_iou=0.0,
     coverage_at_24=0.0,
     coverage_at_8=0.0,
+    support_coverage_at_8=0.0,
 )
 
 
@@ -265,10 +266,11 @@ def _checkpoint_payload(
     return payload
 
 
-def _router_score(metrics: dict[str, Any]) -> tuple[float, float, float]:
+def _router_score(metrics: dict[str, Any]) -> tuple[float, float, float, float]:
     return (
         float(metrics["coverage_at_24"]),
         float(metrics["coverage_at_8"]),
+        float(metrics["support_coverage_at_8"]),
         float(metrics["gaussian_n_iou"]),
     )
 

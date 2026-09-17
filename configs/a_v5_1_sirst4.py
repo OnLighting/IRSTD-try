@@ -1,6 +1,11 @@
 """Historical Stage-A v5.1 training on SIRST4."""
 
-from configs.a_v5_1_irstd1k import diagnostics, loss, model, optim, run
+from configs.a_v5_1_irstd1k import diagnostics, loss, model, optim as base_optim, run
+
+# SIRST4 contains hundreds of native resolutions. Process one image at a time
+# and accumulate four gradients so training preserves geometry and effective
+# batch size without padding image content into the decomposition losses.
+optim = dict(base_optim, batch_size=1, grad_accum_steps=4)
 
 data = dict(
     name="sirst4", root="data/SIRST4-ForLiTE", train_split="train",

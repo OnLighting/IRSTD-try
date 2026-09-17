@@ -2,9 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-from irstd_g0.data import DatasetSpec, SIRST4Dataset, SIRSTUAVBDataset, build_dataset
+from irstd_g0.data import (
+    DatasetSpec,
+    SIRST4Dataset,
+    SIRSTUAVBDataset,
+    _augment,
+    build_dataset,
+)
 from train_a import build_training_datasets, load_config
 
 
@@ -50,6 +57,20 @@ def test_sirst_training_datasets_enable_only_train_augmentation() -> None:
     assert SIRST4Dataset(sirst4_root, split="test", augment=True).augment is False
 
 
+def test_augmentation_preserves_rectangular_sample_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    image = np.arange(12, dtype=np.float32).reshape(3, 4)
+    mask = np.arange(12, dtype=np.float32).reshape(3, 4)
+    monkeypatch.setattr(np.random, "rand", lambda: 1.0)
+    monkeypatch.setattr(np.random, "randint", lambda low, high: 1)
+
+    augmented_image, augmented_mask = _augment(image, mask)
+
+    assert augmented_image.shape == image.shape
+    assert augmented_mask.shape == mask.shape
+    np.testing.assert_array_equal(augmented_image, np.rot90(image, k=2))
+    np.testing.assert_array_equal(augmented_mask, np.rot90(mask, k=2))
+
+
 def test_existing_v52a_config_remains_trainable() -> None:
     config = load_config("configs/a_psf_irstd1k.py")
 
@@ -71,6 +92,13 @@ def test_factory_builds_trainable_sirst_dataset() -> None:
 
     assert dataset.augment is True
     assert len(dataset) == 2400
+
+
+def test_sirst4_uses_single_image_microbatches_for_mixed_resolutions() -> None:
+    config = load_config("configs/a_v5_1_sirst4.py")
+
+    assert config["optim"]["batch_size"] == 1
+    assert config["optim"]["grad_accum_steps"] == 4
 
 
 def test_duplicate_split_ids_are_rejected(tmp_path: Path) -> None:

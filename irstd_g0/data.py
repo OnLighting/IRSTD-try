@@ -142,7 +142,7 @@ def _normalize(img: np.ndarray) -> np.ndarray:
 
 
 def _augment(img: np.ndarray, msk: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Random h-flip / v-flip / 90° rotate. No photometric changes for IR."""
+    """Apply random geometric transforms without changing the sample shape."""
     # h-flip
     if np.random.rand() < 0.5:
         img = img[:, ::-1].copy()
@@ -151,8 +151,12 @@ def _augment(img: np.ndarray, msk: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     if np.random.rand() < 0.5:
         img = img[::-1, :].copy()
         msk = msk[::-1, :].copy()
-    # 90° rotate K=4
-    k = np.random.randint(0, 4)
+    # Odd quarter turns swap H/W and make rectangular samples unbatchable.
+    k = (
+        np.random.randint(0, 4)
+        if img.shape[0] == img.shape[1]
+        else 2 * np.random.randint(0, 2)
+    )
     if k:
         img = np.rot90(img, k=k).copy()
         msk = np.rot90(msk, k=k).copy()
